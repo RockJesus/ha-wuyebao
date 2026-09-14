@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "WuyeBao (JHCloud)",
+        "description": "Enter the phone number and password of your 物业宝(业主) app. The integration logs into the official server https://wuye.jhws.top/ directly — no packet capture needed.",
+        "data": {
+          "phone": "Phone number",
+          "password": "Password"
+        }
+      },
+      "community": {
+        "title": "Select community",
+        "description": "This phone number is bound to multiple communities. Select the community whose gates you want to control.",
+        "data": {
+          "community_name": "Community"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate",
+        "description": "The WuyeBao login expired or the password changed. Please re-enter your credentials.",
+        "data": {
+          "phone": "Phone number",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the server. Check your network and try again",
+      "invalid_auth": "Login failed: wrong phone number or password",
+      "no_community": "No community found for this phone number. Make sure the 物业宝 account is activated",
+      "unknown": "Unknown error, see the Home Assistant log"
+    },
+    "abort": {
+      "already_configured": "This account is already configured",
+      "reauth_successful": "Re-authentication successful",
+      "no_community": "No community found for this phone number"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "WuyeBao options",
+        "description": "Server and open-door details. Defaults come from the official app binary and usually need no changes. {gateId} is replaced with the gate id.",
+        "data": {
+          "base_url": "API base URL",
+          "client_id": "client_id (request header)",
+          "open_path": "Open-door endpoint path",
+          "open_method": "Open-door HTTP method",
+          "community_field": "Community query parameter (default communityId)",
+          "poll_interval": "Poll interval (seconds)"
+        }
+      }
+    }
+  }
+}
