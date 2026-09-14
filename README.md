@@ -31,37 +31,43 @@
 
 ---
 
-## ⚠️ 开门方式说明（v2.5.0）
+## ⚠️ 开门方式说明（v2.6.0）
 
 **物业宝业主端没有 HTTP 开门接口**（官方 APK 逆向 + 线上实测：默认路径与全部候选
-方案均返回 404），开门实际走 **SIP 云对讲**（OpenSIPS 代理 `new-sip.jhws.top:58583`，
-Digest/MD5 鉴权，realm `new-sip.jhws.top`）。
+方案均返回 404），开门实际走 **SIP 云对讲**。逆向官方 APK（libpjsua2.so）确认：
+App 的 SIP 栈为 **PJSIP/pjsua2**，传输为 **TCP**（配置串 `sip:sip.jhws.top;transport=tcp`），
+SIP 服务器集群为 `sip.jhws.top:5060` / `sip.jhws.top:58583` / `new-sip.jhws.top:58583`
+（OpenSIPS 2.1.2，Digest/MD5 鉴权，realm `new-sip.jhws.top` 或 `sip.jhws.top`）。
+服务器对**无有效凭据**的 REGISTER/INVITE 一律静默丢弃（只对 OPTIONS 回 407），
+所以只有用**真实 accessToken** 才能测出 200/403。
 
-因此 v2.5.0 在点击开门时：
+因此 v2.6.0 在点击开门时：
 1. 先按配置的 HTTP 路径尝试开门（兼容有 HTTP 开门能力的物业部署）；
-2. 失败后自动执行 **SIP 诊断**：用（手机号 / userId）×（accessToken / refreshToken）
-   的 4 种组合尝试 SIP REGISTER，再用呼叫目标（uid / gateId / deviceNumber）逐一
-   INVITE，所有结果打日志（**密码/Token 一律脱敏**）。
+2. 失败后自动执行 **SIP 诊断（TCP）**：依次探测 3 个服务器端点，对每个可用端点用
+   （手机号 / userId）× accessToken 的组合尝试 SIP REGISTER，再用呼叫目标
+   （uid / gateId / deviceNumber）逐一 INVITE，所有结果打日志（**Token 一律脱敏**）。
 
 诊断日志形如（HA 日志中搜索 `SIP 开门诊断结果`）：
 
 ```
 INFO ... SIP 开门诊断结果: [
-  {"step": "options", "status": 407, "reason": "Proxy Authentication Required"},
-  {"step": "register:phone+access", "status": 0, "reason": ""},
+  {"server": "sip.jhws.top:5060", "options": 407},
+  {"server": "sip.jhws.top:5060", "step": "register:phone+access", "status": 0, ...},
   ...
-  {"step": "invite:uid", "status": 0, "reason": ""}
+  {"server": "new-sip.jhws.top:58583", "step": "invite:uid", "status": 0, ...}
 ]
 ```
 
-- `status: 0` = 服务器无响应（该凭据/目标不成立，或服务器对无有效凭据的请求静默丢弃）；
-- `status: 407` = 服务器要求鉴权（网络可达、流程正确，凭据不对）；
+- `options: 407` = 服务器可达（TCP 通，鉴权要求）；`options: 0` = 该端点从你的
+  网络不可达；
+- `status: 0` = 服务器无响应（该凭据/目标不成立）；
 - `status: 200 / 180 / 183`（INVITE）= 呼叫成功，**这就是可以固化为开门方案的组合**；
-- 同时在启动时会把**全部门禁原始记录**打印到日志（搜索 `门禁列表共 N 条`），
+- 启动时会把**全部门禁原始记录**打印到日志（搜索 `门禁列表共 N 条`），
   用于确认每个门禁的 `callNumber` / `sip` 相关字段。
 
-**如果你想让开门真正一键可用**，请把上面两类日志发给维护者——有了「哪组凭据
-REGISTER 成功 + 哪个目标 INVITE 成功」，就能把诊断固化为一键开门。
+**如果你想让开门真正一键可用**，请把 `SIP 开门诊断结果` 和 `门禁列表共 N 条`
+两类日志发给维护者——有了「哪个服务器 + 哪组凭据 REGISTER 成功 + 哪个目标
+INVITE 成功」，就能把诊断固化为一键开门。
 
 > 若你的物业提供了 HTTP 开门接口（部分项目部署了），在「选项」里填上接口路径即可，
 > 无需 SIP。

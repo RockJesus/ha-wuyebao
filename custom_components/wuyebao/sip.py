@@ -92,11 +92,13 @@ class SipClient:
         local_ip: str | None = None,
         timeout: float = SIP_TIMEOUT,
         retries: int = SIP_RETRIES,
+        transport: str = "tcp",
     ) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
         self.retries = retries
+        self.transport = transport.lower()
         self.local_ip = local_ip or self._discover_local_ip()
 
     @staticmethod
@@ -120,10 +122,12 @@ class SipClient:
         auth: str | None = None,
         extra_headers: str = "",
     ) -> str:
+        transport = self.transport.upper()
+        contact_transport = ";transport=tcp" if self.transport == "tcp" else ""
         lines = [
             f"{method} {uri} SIP/2.0",
             (
-                f"Via: SIP/2.0/UDP {self.local_ip}:5060;"
+                f"Via: SIP/2.0/{transport} {self.local_ip}:5060;"
                 f"branch=z9hG4bK-{int(time.time()*1000)}{cseq};rport"
             ),
             "Max-Forwards: 70",
@@ -131,8 +135,8 @@ class SipClient:
             f"To: <sip:{user}@{self.host}>",
             f"Call-ID: wb-{int(time.time()*1000)}-{cseq}@{self.local_ip}",
             f"CSeq: {cseq} {method}",
-            f"Contact: <sip:{user}@{self.local_ip}:5060>",
-            "User-Agent: wuyebao-ha/2.5.0 (pjsua-compatible)",
+            f"Contact: <sip:{user}@{self.local_ip}:5060{contact_transport}>",
+            "User-Agent: wuyebao-ha/2.6.0 (pjsua-compatible)",
         ]
         if auth:
             lines.append(auth)
@@ -145,7 +149,13 @@ class SipClient:
         return "\r\n".join(lines) + "\r\n"
 
     def _exchange(self, payload: str) -> str:
-        """Send one UDP datagram and collect the response (blocking)."""
+        """Send one SIP message over UDP or TCP and collect the response."""
+        if self.transport == "tcp":
+            return self._exchange_tcp(payload)
+        return self._exchange_udp(payload)
+
+    def _exchange_udp(self, payload: str) -> str:
+        """UDP variant of _exchange."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(self.timeout)
         try:
@@ -168,6 +178,30 @@ class SipClient:
                     return last
                 time.sleep(SIP_GAP)
             return last
+        finally:
+            sock.close()
+
+    def _exchange_tcp(self, payload: str) -> str:
+        """TCP variant of _exchange (fresh connection per message)."""
+        try:
+            sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        except OSError as err:
+            return f"ERROR: {err!r}"
+        sock.settimeout(self.timeout)
+        try:
+            sock.sendall(payload.encode("utf-8"))
+            chunks = []
+            try:
+                while True:
+                    data = sock.recv(65536)
+                    if not data:
+                        break
+                    chunks.append(data.decode("utf-8", "replace"))
+                    if len(b"".join(c.encode() for c in chunks)) > 30000:
+                        break
+            except socket.timeout:
+                pass
+            return "".join(chunks)
         finally:
             sock.close()
 

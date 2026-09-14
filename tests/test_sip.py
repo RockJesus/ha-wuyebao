@@ -79,7 +79,7 @@ class TestSipDigest(unittest.TestCase):
         self.assertEqual(mask_secret(None), "")
 
     def test_build_message_shape(self):
-        client = SipClient(local_ip="10.0.0.9")
+        client = SipClient(local_ip="10.0.0.9", transport="udp")
         msg = client._build_message("REGISTER", "sip:new-sip.jhws.top", "13000000000", 1)
         self.assertIn("REGISTER sip:new-sip.jhws.top SIP/2.0", msg)
         self.assertIn("Via: SIP/2.0/UDP 10.0.0.9:5060", msg)
@@ -92,6 +92,19 @@ class TestSipDigest(unittest.TestCase):
             "INVITE", "sip:abc-123@new-sip.jhws.top", "13000000000", 1
         )
         self.assertIn("INVITE sip:abc-123@new-sip.jhws.top SIP/2.0", msg)
+
+    def test_tcp_transport_message_shape(self):
+        client = SipClient(local_ip="10.0.0.9", transport="tcp")
+        msg = client._build_message("REGISTER", "sip:new-sip.jhws.top", "13000000000", 1)
+        self.assertIn("Via: SIP/2.0/TCP 10.0.0.9:5060", msg)
+        self.assertIn("Contact: <sip:13000000000@10.0.0.9:5060;transport=tcp>", msg)
+        self.assertTrue(msg.endswith("\r\n\r\n"))
+
+    def test_udp_transport_message_shape(self):
+        client = SipClient(local_ip="10.0.0.9", transport="udp")
+        msg = client._build_message("REGISTER", "sip:new-sip.jhws.top", "13000000000", 1)
+        self.assertIn("Via: SIP/2.0/UDP 10.0.0.9:5060", msg)
+        self.assertIn("Contact: <sip:13000000000@10.0.0.9:5060>", msg)
 
 
 if __name__ == "__main__":

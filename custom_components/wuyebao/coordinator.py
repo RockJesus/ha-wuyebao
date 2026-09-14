@@ -143,9 +143,11 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         """Probe SIP registration and call candidates; log every outcome.
 
-        Credential candidates: (phone | userId) x (accessToken | refreshToken).
-        Call targets: gate uid / gate id / deviceNumber on the SIP realm.
-        All sensitive values are masked in logs.
+        Transport: TCP (the official app's pjsua2 stack uses
+        `sip:sip.jhws.top;transport=tcp`). Sweeps both known SIP server
+        endpoints. Credential candidates: (phone | userId) x accessToken
+        (login response carries no refreshToken). Call targets: gate uid /
+        gate id / deviceNumber on the SIP realm. All secrets are masked.
         """
         raw = raw or {}
         gate_uid = str(raw.get("uid") or "") or None
@@ -157,17 +159,12 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             user_id = str(owners.get("userId") or user_id or "") or None
 
         phone = str(self.entry.data.get(CONF_PHONE) or "") or None
-        refresh_token = self._refresh_token
 
         identities: list[tuple[str, str, str]] = []
         if phone and token:
             identities.append(("phone+access", phone, token))
         if user_id and token:
             identities.append(("userId+access", user_id, token))
-        if phone and refresh_token:
-            identities.append(("phone+refresh", phone, refresh_token))
-        if user_id and refresh_token:
-            identities.append(("userId+refresh", user_id, refresh_token))
 
         targets: list[tuple[str, str]] = []
         if gate_uid:
@@ -176,82 +173,98 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if device_number:
             targets.append(("deviceNumber", device_number))
 
-        try:
-            client = SipClient()
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("初始化 SIP 客户端失败: %s", err)
-            return
+        servers = [
+            ("new-sip.jhws.top", 58583),
+            ("sip.jhws.top", 5060),
+            ("sip.jhws.top", 58583),
+        ]
 
         log: list[dict] = []
-        ok_reg: tuple[str, str] | None = None
-
-        # Reachability first.
-        try:
-            probe = await self.hass.async_add_executor_job(client.options, phone or "probe", None)
-            log.append({"step": "options", **probe})
-        except Exception as err:  # noqa: BLE001
-            log.append({"step": "options", "error": str(err)})
-
-        for label, user, secret in identities:
-            if not user or not secret:
-                continue
+        for host, port in servers:
             try:
-                res = await self.hass.async_add_executor_job(
-                    client.register, user, secret
+                client = SipClient(host, port, transport="tcp", timeout=4.0, retries=1)
+            except Exception as err:  # noqa: BLE001
+                log.append({"server": f"{host}:{port}", "init_error": str(err)})
+                continue
+
+            probe = None
+            try:
+                probe = await self.hass.async_add_executor_job(
+                    client.options, phone or "probe", None
                 )
             except Exception as err:  # noqa: BLE001
-                log.append({"step": f"register:{label}", "error": str(err)})
+                log.append({"server": f"{host}:{port}", "options_error": str(err)})
                 continue
-            log.append(
-                {
-                    "step": f"register:{label}",
-                    "status": res.get("status"),
-                    "reason": res.get("reason"),
-                    "pwd": mask_secret(secret),
-                }
-            )
-            if res.get("status") == 200 and ok_reg is None:
-                ok_reg = (user, secret)
+            log.append({"server": f"{host}:{port}", "options": probe.get("status")})
+            if not probe.get("status"):
+                # Unreachable (e.g. UDP/TCP blocked from this network).
+                continue
 
-        # Call with the first successful identity, then with every identity if
-        # none registered, against every plausible callee.
-        call_ids = (
-            [(ok_reg[0], ok_reg[1])] if ok_reg else [(u, s) for _l, u, s in identities]
-        )
-        for user, secret in call_ids:
-            for tlabel, target in targets:
-                uri = f"sip:{target}@{client.host}"
+            ok_reg: tuple[str, str] | None = None
+            for label, user, secret in identities:
+                if not user or not secret:
+                    continue
                 try:
                     res = await self.hass.async_add_executor_job(
-                        client.invite, user, secret, uri
+                        client.register, user, secret
                     )
                 except Exception as err:  # noqa: BLE001
                     log.append(
-                        {
-                            "step": f"invite:{tlabel}",
-                            "user": user,
-                            "uri": uri,
-                            "error": str(err),
-                        }
+                        {"server": f"{host}:{port}", "step": f"register:{label}", "error": str(err)}
                     )
                     continue
                 log.append(
                     {
-                        "step": f"invite:{tlabel}",
-                        "user": user,
-                        "uri": uri,
+                        "server": f"{host}:{port}",
+                        "step": f"register:{label}",
                         "status": res.get("status"),
                         "reason": res.get("reason"),
                         "pwd": mask_secret(secret),
                     }
                 )
-                if res.get("status") in (100, 180, 183, 200):
-                    _LOGGER.info(
-                        "SIP 呼叫疑似成功: %s -> %s (status=%s) —— 可据此确定开门方案",
-                        user,
-                        uri,
-                        res.get("status"),
+                if res.get("status") == 200 and ok_reg is None:
+                    ok_reg = (user, secret)
+
+            call_ids = (
+                [(ok_reg[0], ok_reg[1])] if ok_reg else [(u, s) for _l, u, s in identities]
+            )
+            for user, secret in call_ids:
+                for tlabel, target in targets:
+                    uri = f"sip:{target}@{client.host}"
+                    try:
+                        res = await self.hass.async_add_executor_job(
+                            client.invite, user, secret, uri
+                        )
+                    except Exception as err:  # noqa: BLE001
+                        log.append(
+                            {
+                                "server": f"{host}:{port}",
+                                "step": f"invite:{tlabel}",
+                                "user": user,
+                                "uri": uri,
+                                "error": str(err),
+                            }
+                        )
+                        continue
+                    log.append(
+                        {
+                            "server": f"{host}:{port}",
+                            "step": f"invite:{tlabel}",
+                            "user": user,
+                            "uri": uri,
+                            "status": res.get("status"),
+                            "reason": res.get("reason"),
+                            "pwd": mask_secret(secret),
+                        }
                     )
+                    if res.get("status") in (100, 180, 183, 200):
+                        _LOGGER.info(
+                            "SIP 呼叫疑似成功: %s %s -> %s (status=%s) —— 可据此确定开门方案",
+                            host,
+                            user,
+                            uri,
+                            res.get("status"),
+                        )
 
         _LOGGER.info("SIP 开门诊断结果: %s", json.dumps(log, ensure_ascii=False, default=str))
 
