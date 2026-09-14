@@ -213,12 +213,32 @@ class SipClient:
         password: str | None,
         cseq: int,
         extra_headers: str = "",
+        challenge: tuple[str, str] | None = None,
     ) -> tuple[int, str, dict]:
         """Send a request; on 407/401 challenge, retry once with Digest auth.
+
+        If `challenge=(realm, nonce)` is given, the request is sent once with
+        a pre-computed Proxy-Authorization header instead (needed because the
+        JHCloud OpenSIPS proxy silently drops unauthenticated REGISTER/INVITE).
 
         Returns (status_code, reason, info) where info carries challenge
         details, the masked credential used, etc.
         """
+        if challenge:
+            realm, nonce = challenge
+            if realm and nonce and password:
+                auth = build_proxy_auth(user, realm, nonce, password, method, uri)
+                resp = self._exchange(
+                    self._build_message(
+                        method, uri, user, cseq + 1, auth=auth, extra_headers=extra_headers
+                    )
+                )
+                status, reason = parse_status(resp)
+                return (
+                    status,
+                    reason,
+                    {"raw": resp, "realm": realm, "nonce": nonce, "preauth": True},
+                )
         first = self._exchange(self._build_message(method, uri, user, cseq))
         status, reason = parse_status(first)
         if status not in (401, 407):
@@ -242,9 +262,20 @@ class SipClient:
         status, reason, info = self._request("OPTIONS", uri, user, password, 1)
         return {"method": "OPTIONS", "status": status, "reason": reason, **info}
 
-    def register(self, user: str, password: str | None = None) -> dict:
+    def register(
+        self,
+        user: str,
+        password: str | None = None,
+        challenge: tuple[str, str] | None = None,
+    ) -> dict:
+        """REGISTER. If challenge=(realm, nonce) is supplied, the message is
+        sent with a pre-computed Proxy-Authorization header (the OpenSIPS
+        proxy silently drops unauthenticated REGISTER, so the standard
+        challenge-then-retry flow never completes for REGISTER/INVITE)."""
         uri = f"sip:{self.host}"
-        status, reason, info = self._request("REGISTER", uri, user, password, 1)
+        status, reason, info = self._request(
+            "REGISTER", uri, user, password, 1, challenge=challenge
+        )
         return {"method": "REGISTER", "status": status, "reason": reason, **info}
 
     def invite(
@@ -253,6 +284,7 @@ class SipClient:
         password: str | None,
         to_uri: str,
         cseq: int = 1,
+        challenge: tuple[str, str] | None = None,
     ) -> dict:
         sdp = (
             "Content-Type: application/sdp\r\n\r\n"
@@ -261,6 +293,6 @@ class SipClient:
             "a=rtpmap:101 telephone-event/8000\r\n"
         )
         status, reason, info = self._request(
-            "INVITE", to_uri, from_user, password, cseq, extra_headers=sdp
+            "INVITE", to_uri, from_user, password, cseq, extra_headers=sdp, challenge=challenge
         )
         return {"method": "INVITE", "status": status, "reason": reason, **info}

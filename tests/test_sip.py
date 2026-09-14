@@ -106,6 +106,44 @@ class TestSipDigest(unittest.TestCase):
         self.assertIn("Via: SIP/2.0/UDP 10.0.0.9:5060", msg)
         self.assertIn("Contact: <sip:13000000000@10.0.0.9:5060>", msg)
 
+    def test_register_with_challenge_sends_preauth(self):
+        client = SipClient(local_ip="10.0.0.9", transport="tcp")
+        captured = {}
+
+        def fake_exchange(payload):
+            captured["payload"] = payload
+            return "SIP/2.0 403 Forbidden\r\n\r\n"
+
+        client._exchange = fake_exchange
+        res = client.register(
+            "13000000000", "secret", challenge=("realm-x", "nonce-y")
+        )
+        self.assertEqual(res["status"], 403)
+        self.assertTrue(res.get("preauth"))
+        self.assertIn("Proxy-Authorization: Digest", captured["payload"])
+        self.assertIn('username="13000000000"', captured["payload"])
+        self.assertIn('nonce="nonce-y"', captured["payload"])
+        self.assertTrue(captured["payload"].endswith("\r\n\r\n"))
+
+    def test_invite_with_challenge_sends_preauth(self):
+        client = SipClient(local_ip="10.0.0.9", transport="tcp")
+        captured = {}
+
+        def fake_exchange(payload):
+            captured["payload"] = payload
+            return "SIP/2.0 486 Busy Here\r\n\r\n"
+
+        client._exchange = fake_exchange
+        res = client.invite(
+            "13000000000",
+            "secret",
+            "sip:abc-123@sip.jhws.top",
+            challenge=("realm-x", "nonce-y"),
+        )
+        self.assertEqual(res["status"], 486)
+        self.assertIn("Proxy-Authorization: Digest", captured["payload"])
+        self.assertIn("INVITE sip:abc-123@sip.jhws.top SIP/2.0", captured["payload"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,7 +31,7 @@
 
 ---
 
-## ⚠️ 开门方式说明（v2.6.0）
+## ⚠️ 开门方式说明（v2.6.1）
 
 **物业宝业主端没有 HTTP 开门接口**（官方 APK 逆向 + 线上实测：默认路径与全部候选
 方案均返回 404），开门实际走 **SIP 云对讲**。逆向官方 APK（libpjsua2.so）确认：
@@ -41,11 +41,19 @@ SIP 服务器集群为 `sip.jhws.top:5060` / `sip.jhws.top:58583` / `new-sip.jhw
 服务器对**无有效凭据**的 REGISTER/INVITE 一律静默丢弃（只对 OPTIONS 回 407），
 所以只有用**真实 accessToken** 才能测出 200/403。
 
-因此 v2.6.0 在点击开门时：
+因此 v2.6.2 在点击开门时：
 1. 先按配置的 HTTP 路径尝试开门（兼容有 HTTP 开门能力的物业部署）；
-2. 失败后自动执行 **SIP 诊断（TCP）**：依次探测 3 个服务器端点，对每个可用端点用
-   （手机号 / userId）× accessToken 的组合尝试 SIP REGISTER，再用呼叫目标
-   （uid / gateId / deviceNumber）逐一 INVITE，所有结果打日志（**Token 一律脱敏**）。
+2. 失败后自动执行 **SIP 诊断（TCP，3 端点并行）**：先用 OPTIONS 从每个端点
+   获取 Digest challenge（realm + nonce），再用 **预置鉴权** 的 REGISTER
+   （（手机号 / userId）× accessToken）与 **预置鉴权** 的 INVITE（门禁记录里的
+   全部标识符：uid / gateId / deviceNumber / buildingId / unitId / areaId /
+   communityCode / bindingCode / 区域+设备号组合）逐一发送，所有结果打日志
+   （**Token 一律脱敏**）。
+
+> **为什么必须预置鉴权**：实测 JHCloud 的 OpenSIPS 代理对**不带鉴权的
+> REGISTER / INVITE 直接静默丢弃**（只有 OPTIONS 回 407），所以必须先拿
+> nonce、把 Digest 算好放进首包发出——否则 REGISTER/INVITE 永远是 status 0，
+> 即使凭据正确也测不出来。
 
 诊断日志形如（HA 日志中搜索 `SIP 开门诊断结果`）：
 
@@ -54,7 +62,7 @@ INFO ... SIP 开门诊断结果: [
   {"server": "sip.jhws.top:5060", "options": 407},
   {"server": "sip.jhws.top:5060", "step": "register:phone+access", "status": 0, ...},
   ...
-  {"server": "new-sip.jhws.top:58583", "step": "invite:uid", "status": 0, ...}
+  {"server": "new-sip.jhws.top:58583", "step": "invite:unitId", "status": 0, ...}
 ]
 ```
 

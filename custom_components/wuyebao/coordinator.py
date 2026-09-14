@@ -6,6 +6,7 @@ exposes the owner info for the sensors/buttons.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
@@ -144,15 +145,24 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Probe SIP registration and call candidates; log every outcome.
 
         Transport: TCP (the official app's pjsua2 stack uses
-        `sip:sip.jhws.top;transport=tcp`). Sweeps both known SIP server
-        endpoints. Credential candidates: (phone | userId) x accessToken
-        (login response carries no refreshToken). Call targets: gate uid /
-        gate id / deviceNumber on the SIP realm. All secrets are masked.
+        `sip:sip.jhws.top;transport=tcp`). The three known SIP server
+        endpoints are probed **in parallel**. Credential candidates:
+        (phone | userId) x accessToken (login response carries no
+        refreshToken). Call targets cover every identifier carried by the
+        gate record (uid / id / deviceNumber / buildingId / unitId / areaId
+        / communityCode / bindingCode) plus common prefixed forms. All
+        secrets are masked.
         """
         raw = raw or {}
         gate_uid = str(raw.get("uid") or "") or None
         device_number = str(raw.get("deviceNumber") or "") or None
         user_id = str(raw.get("userId") or raw.get("uid") or "") or None
+        building_id = str(raw.get("buildingId") or "") or None
+        unit_id = str(raw.get("unitId") or "") or None
+        area_id = str(raw.get("areaId") or "") or None
+        area_code = str(raw.get("areaCode") or "") or None
+        community_code = str(raw.get("communityCode") or "") or None
+        binding_code = str(raw.get("bindingCode") or "") or None
         # Prefer the account owner record for the SIP identity.
         owners = (self.data or {}).get(ATTR_OWNER)
         if isinstance(owners, dict):
@@ -172,6 +182,21 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         targets.append(("gate_id", gate_id))
         if device_number:
             targets.append(("deviceNumber", device_number))
+        if building_id:
+            targets.append(("buildingId", building_id))
+        if unit_id:
+            targets.append(("unitId", unit_id))
+        if area_id:
+            targets.append(("areaId", area_id))
+        if community_code:
+            targets.append(("communityCode", community_code))
+        if binding_code:
+            targets.append(("bindingCode", binding_code))
+        # Common prefixed forms (area/community + device number).
+        if device_number and area_code:
+            targets.append(("areaCode-deviceNumber", f"{area_code}-{device_number}"))
+        if device_number and community_code:
+            targets.append(("communityCode-deviceNumber", f"{community_code}-{device_number}"))
 
         servers = [
             ("new-sip.jhws.top", 58583),
@@ -179,35 +204,50 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ("sip.jhws.top", 58583),
         ]
 
-        log: list[dict] = []
-        for host, port in servers:
+        def probe_server(
+            host: str, port: int
+        ) -> list[dict]:
+            """Full synchronous probe of one endpoint (runs in executor)."""
+            log: list[dict] = []
             try:
-                client = SipClient(host, port, transport="tcp", timeout=4.0, retries=1)
+                client = SipClient(host, port, transport="tcp", timeout=3.0, retries=1)
             except Exception as err:  # noqa: BLE001
                 log.append({"server": f"{host}:{port}", "init_error": str(err)})
-                continue
+                return log
 
-            probe = None
             try:
-                probe = await self.hass.async_add_executor_job(
-                    client.options, phone or "probe", None
-                )
+                probe = client.options(phone or "probe", None)
             except Exception as err:  # noqa: BLE001
                 log.append({"server": f"{host}:{port}", "options_error": str(err)})
-                continue
+                return log
             log.append({"server": f"{host}:{port}", "options": probe.get("status")})
             if not probe.get("status"):
-                # Unreachable (e.g. UDP/TCP blocked from this network).
-                continue
+                # Unreachable from this network.
+                return log
+
+            # The proxy answers OPTIONS with 407 and a nonce; REGISTER/INVITE
+            # are silently dropped unless they already carry a valid
+            # Proxy-Authorization, so pre-compute it from this challenge.
+            challenge: tuple[str, str] | None = None
+            realm = probe.get("realm")
+            nonce = probe.get("nonce")
+            if realm and nonce:
+                challenge = (realm, nonce)
+            log.append(
+                {
+                    "server": f"{host}:{port}",
+                    "step": "challenge",
+                    "realm": realm,
+                    "preauth": bool(challenge),
+                }
+            )
 
             ok_reg: tuple[str, str] | None = None
             for label, user, secret in identities:
                 if not user or not secret:
                     continue
                 try:
-                    res = await self.hass.async_add_executor_job(
-                        client.register, user, secret
-                    )
+                    res = client.register(user, secret, challenge=challenge)
                 except Exception as err:  # noqa: BLE001
                     log.append(
                         {"server": f"{host}:{port}", "step": f"register:{label}", "error": str(err)}
@@ -232,9 +272,7 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for tlabel, target in targets:
                     uri = f"sip:{target}@{client.host}"
                     try:
-                        res = await self.hass.async_add_executor_job(
-                            client.invite, user, secret, uri
-                        )
+                        res = client.invite(user, secret, uri, challenge=challenge)
                     except Exception as err:  # noqa: BLE001
                         log.append(
                             {
@@ -265,6 +303,18 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             uri,
                             res.get("status"),
                         )
+            return log
+
+        # Probe the three endpoints in parallel.
+        logs = await asyncio.gather(
+            *[
+                self.hass.async_add_executor_job(probe_server, host, port)
+                for host, port in servers
+            ]
+        )
+        log: list[dict] = []
+        for part in logs:
+            log.extend(part)
 
         _LOGGER.info("SIP 开门诊断结果: %s", json.dumps(log, ensure_ascii=False, default=str))
 
