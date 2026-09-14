@@ -1,5 +1,5 @@
 {
-  "name": "物业宝 (WuyeBao) Home Assistant 集成",
+  "name": "物业宝（家和云联）Home Assistant 集成",
   "content_in_root": false,
   "render_readme": true,
   "domains": ["wuyebao"],
