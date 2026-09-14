@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "物业宝（家和云联）接入",
+        "description": "输入物业宝（业主）App 的手机号和密码。集成会直接登录官方服务器 https://wuye.jhws.top/，无需抓包。",
+        "data": {
+          "phone": "手机号",
+          "password": "密码"
+        }
+      },
+      "community": {
+        "title": "选择小区",
+        "description": "该手机号绑定了多个小区，请选择要接入门禁的小区。",
+        "data": {
+          "community_name": "小区"
+        }
+      },
+      "reauth_confirm": {
+        "title": "重新认证",
+        "description": "物业宝登录失效或密码已修改，请重新输入账号密码。",
+        "data": {
+          "phone": "手机号",
+          "password": "密码"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "无法连接服务器，请检查网络或稍后重试",
+      "invalid_auth": "登录失败：手机号或密码错误",
+      "no_community": "该手机号未查询到绑定的小区，请确认已开通物业宝账号",
+      "unknown": "未知错误，请查看 Home Assistant 日志"
+    },
+    "abort": {
+      "already_configured": "该账号已配置",
+      "reauth_successful": "重新认证成功",
+      "no_community": "该手机号未查询到绑定的小区"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "物业宝选项",
+        "description": "服务器与开门接口细节。默认值来自官方 App 逆向结果，一般无需修改。{gateId} 会被替换为门禁 ID。",
+        "data": {
+          "base_url": "API 服务器地址",
+          "client_id": "client_id（请求头）",
+          "open_path": "开门接口路径",
+          "open_method": "开门请求方式",
+          "community_field": "小区参数名（默认 communityId）",
+          "poll_interval": "轮询间隔（秒）"
+        }
+      }
+    }
+  }
+}
