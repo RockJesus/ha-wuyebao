@@ -246,28 +246,42 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for label, user, secret in identities:
                 if not user or not secret:
                     continue
-                try:
-                    res = client.register(user, secret, challenge=challenge)
-                except Exception as err:  # noqa: BLE001
+                # Two Request-URI forms: user-less (standard registrar URI)
+                # and user-qualified (some endpoints reject the user-less one).
+                for vlabel, uri_user in (("std", None), ("user", user)):
+                    try:
+                        res = client.register(user, secret, challenge=challenge, uri_user=uri_user)
+                    except Exception as err:  # noqa: BLE001
+                        log.append(
+                            {
+                                "server": f"{host}:{port}",
+                                "step": f"register:{label}:{vlabel}",
+                                "error": str(err),
+                            }
+                        )
+                        continue
                     log.append(
-                        {"server": f"{host}:{port}", "step": f"register:{label}", "error": str(err)}
+                        {
+                            "server": f"{host}:{port}",
+                            "step": f"register:{label}:{vlabel}",
+                            "status": res.get("status"),
+                            "reason": res.get("reason"),
+                            "pwd": mask_secret(secret),
+                        }
                     )
-                    continue
-                log.append(
-                    {
-                        "server": f"{host}:{port}",
-                        "step": f"register:{label}",
-                        "status": res.get("status"),
-                        "reason": res.get("reason"),
-                        "pwd": mask_secret(secret),
-                    }
-                )
-                if res.get("status") == 200 and ok_reg is None:
-                    ok_reg = (user, secret)
+                    if res.get("status") == 200 and ok_reg is None:
+                        ok_reg = (user, secret)
 
             call_ids = (
                 [(ok_reg[0], ok_reg[1])] if ok_reg else [(u, s) for _l, u, s in identities]
             )
+            if not challenge:
+                # Without realm+nonce an authenticated INVITE is impossible and
+                # an unauthenticated one is silently dropped; skip to save time.
+                log.append(
+                    {"server": f"{host}:{port}", "step": "invite", "note": "skipped (no challenge)"}
+                )
+                return log
             for user, secret in call_ids:
                 for tlabel, target in targets:
                     uri = f"sip:{target}@{client.host}"

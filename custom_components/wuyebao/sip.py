@@ -121,9 +121,13 @@ class SipClient:
         cseq: int,
         auth: str | None = None,
         extra_headers: str = "",
+        to_user: str | None = None,
     ) -> str:
         transport = self.transport.upper()
         contact_transport = ";transport=tcp" if self.transport == "tcp" else ""
+        # For INVITE the To header must be the callee (the door device), not
+        # the caller; for OPTIONS/REGISTER To equals the local identity.
+        to = to_user or user
         lines = [
             f"{method} {uri} SIP/2.0",
             (
@@ -132,11 +136,11 @@ class SipClient:
             ),
             "Max-Forwards: 70",
             f"From: <sip:{user}@{self.host}>;tag=t{cseq}",
-            f"To: <sip:{user}@{self.host}>",
+            f"To: <sip:{to}@{self.host}>",
             f"Call-ID: wb-{int(time.time()*1000)}-{cseq}@{self.local_ip}",
             f"CSeq: {cseq} {method}",
             f"Contact: <sip:{user}@{self.local_ip}:5060{contact_transport}>",
-            "User-Agent: wuyebao-ha/2.6.0 (pjsua-compatible)",
+            "User-Agent: wuyebao-ha/2.6.3 (pjsua-compatible)",
         ]
         if auth:
             lines.append(auth)
@@ -214,6 +218,7 @@ class SipClient:
         cseq: int,
         extra_headers: str = "",
         challenge: tuple[str, str] | None = None,
+        to_user: str | None = None,
     ) -> tuple[int, str, dict]:
         """Send a request; on 407/401 challenge, retry once with Digest auth.
 
@@ -230,7 +235,7 @@ class SipClient:
                 auth = build_proxy_auth(user, realm, nonce, password, method, uri)
                 resp = self._exchange(
                     self._build_message(
-                        method, uri, user, cseq + 1, auth=auth, extra_headers=extra_headers
+                        method, uri, user, cseq + 1, auth=auth, extra_headers=extra_headers, to_user=to_user
                     )
                 )
                 status, reason = parse_status(resp)
@@ -249,7 +254,7 @@ class SipClient:
         if realm and nonce and password:
             auth = build_proxy_auth(user, realm, nonce, password, method, uri)
             second = self._exchange(
-                self._build_message(method, uri, user, cseq + 1, auth=auth, extra_headers=extra_headers)
+                self._build_message(method, uri, user, cseq + 1, auth=auth, extra_headers=extra_headers, to_user=to_user)
             )
             status, reason = parse_status(second)
             info["raw"] = second
@@ -267,12 +272,15 @@ class SipClient:
         user: str,
         password: str | None = None,
         challenge: tuple[str, str] | None = None,
+        uri_user: str | None = None,
     ) -> dict:
         """REGISTER. If challenge=(realm, nonce) is supplied, the message is
         sent with a pre-computed Proxy-Authorization header (the OpenSIPS
         proxy silently drops unauthenticated REGISTER, so the standard
-        challenge-then-retry flow never completes for REGISTER/INVITE)."""
-        uri = f"sip:{self.host}"
+        challenge-then-retry flow never completes for REGISTER/INVITE).
+        `uri_user` switches the Request-URI to sip:<uri_user>@host (some
+        endpoints answer 484/404 for a user-less registrar URI)."""
+        uri = f"sip:{uri_user or ''}@{self.host}" if uri_user else f"sip:{self.host}"
         status, reason, info = self._request(
             "REGISTER", uri, user, password, 1, challenge=challenge
         )
@@ -292,7 +300,10 @@ class SipClient:
             "t=0 0\r\nm=audio 4000 RTP/AVP 0 8 18 101\r\n"
             "a=rtpmap:101 telephone-event/8000\r\n"
         )
+        # The To header must name the callee (target user of to_uri).
+        m = re.match(r"sip:([^@]+)@", to_uri)
+        to_user = m.group(1) if m else from_user
         status, reason, info = self._request(
-            "INVITE", to_uri, from_user, password, cseq, extra_headers=sdp, challenge=challenge
+            "INVITE", to_uri, from_user, password, cseq, extra_headers=sdp, challenge=challenge, to_user=to_user
         )
         return {"method": "INVITE", "status": status, "reason": reason, **info}

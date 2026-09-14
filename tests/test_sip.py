@@ -137,12 +137,33 @@ class TestSipDigest(unittest.TestCase):
         res = client.invite(
             "13000000000",
             "secret",
-            "sip:abc-123@sip.jhws.top",
+            "sip:abc-123@new-sip.jhws.top",
             challenge=("realm-x", "nonce-y"),
         )
         self.assertEqual(res["status"], 486)
         self.assertIn("Proxy-Authorization: Digest", captured["payload"])
-        self.assertIn("INVITE sip:abc-123@sip.jhws.top SIP/2.0", captured["payload"])
+        self.assertIn("INVITE sip:abc-123@new-sip.jhws.top SIP/2.0", captured["payload"])
+        # To header must name the callee, not the caller.
+        self.assertIn("To: <sip:abc-123@new-sip.jhws.top>", captured["payload"])
+        self.assertIn("From: <sip:13000000000@new-sip.jhws.top>", captured["payload"])
+
+    def test_register_with_uri_user_form(self):
+        client = SipClient(local_ip="10.0.0.9", transport="tcp")
+        captured = {}
+
+        def fake_exchange(payload):
+            captured["payload"] = payload
+            return "SIP/2.0 403 Forbidden\r\n\r\n"
+
+        client._exchange = fake_exchange
+        res = client.register(
+            "13000000000",
+            "secret",
+            challenge=("realm-x", "nonce-y"),
+            uri_user="13000000000",
+        )
+        self.assertEqual(res["status"], 403)
+        self.assertIn("REGISTER sip:13000000000@new-sip.jhws.top SIP/2.0", captured["payload"])
 
 
 if __name__ == "__main__":
