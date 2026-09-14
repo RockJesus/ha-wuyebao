@@ -1,0 +1,8 @@
+{
+  "name": "物业宝 (WuyeBao) Home Assistant 集成",
+  "content_in_root": false,
+  "render_readme": true,
+  "domains": ["wuyebao"],
+  "country": ["CN"],
+  "homeassistant": "2024.2.0"
+}
