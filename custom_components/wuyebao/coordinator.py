@@ -118,6 +118,12 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             owners = await self.api.get_owners(token)
             if owners:
+                if not getattr(self, "_logged_owner_dump", False):
+                    self._logged_owner_dump = True
+                    _LOGGER.info(
+                        "业主响应(第一条完整): %s",
+                        json.dumps(owners[0], ensure_ascii=False, default=str),
+                    )
                 owner = dict(owners[0])
                 owner.pop("raw", None)
         except Exception as err:  # noqa: BLE001 - non-fatal

@@ -19,6 +19,7 @@ config flow and the integration talks to the official API directly.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 from urllib.parse import urljoin
@@ -180,6 +181,12 @@ class WuyeBaoAPI:
         if not access_token:
             raise WuyeBaoAuthError("登录接口未返回 accessToken，请检查账号密码")
         refresh_token = find_refresh_token(data)
+        # Diagnostic: the full login payload may carry SIP credentials
+        # (e.g. sipToken / sipServer) needed for the SIP open-door path.
+        _LOGGER.info(
+            "物业宝登录响应(完整字段): %s",
+            json.dumps(data, ensure_ascii=False, default=str),
+        )
         _LOGGER.debug("物业宝登录成功")
         return access_token, refresh_token
 
