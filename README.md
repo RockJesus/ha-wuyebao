@@ -45,10 +45,16 @@ SIP 服务器集群为 `sip.jhws.top:5060` / `sip.jhws.top:58583` / `new-sip.jhw
 1. 先按配置的 HTTP 路径尝试开门（兼容有 HTTP 开门能力的物业部署）；
 2. 失败后自动执行 **SIP 诊断（TCP，3 端点并行）**：先用 OPTIONS 从每个端点
    获取 Digest challenge（realm + nonce），再用 **预置鉴权** 的 REGISTER
-   （（手机号 / userId）× accessToken）与 **预置鉴权** 的 INVITE（门禁记录里的
-   全部标识符：uid / gateId / deviceNumber / buildingId / unitId / areaId /
-   communityCode / bindingCode / 区域+设备号组合）逐一发送，所有结果打日志
-   （**Token 一律脱敏**）。
+   （**（手机号 / userId）× 登录密码**，以及（手机号 / userId）× accessToken）
+   与 **预置鉴权** 的 INVITE（门禁记录里的全部标识符：uid / gateId /
+   deviceNumber / buildingId / unitId / areaId / communityCode / bindingCode /
+   区域+设备号组合）逐一发送，所有结果打日志（**Token 与密码一律脱敏**）。
+
+> **为什么用登录密码**：官方 APK 逆向确认 App 的 SIP 逻辑在
+> `com.sip.core`（Java 层，pjsua2）与 `SIPTokenUtils`（Dart 层，SP 键
+> `SIP_ACCESS_TOKEN`），SIP 账号体系与业主账号体系同源的可能性最大，
+> 因此本轮把「手机号/用户ID + 你在 HA 里填的登录密码」作为第一候选凭据
+> （accessToken 组合保留作对比）。
 
 > **为什么必须预置鉴权**：实测 JHCloud 的 OpenSIPS 代理对**不带鉴权的
 > REGISTER / INVITE 直接静默丢弃**（只有 OPTIONS 回 407），所以必须先拿

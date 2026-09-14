@@ -9,5 +9,5 @@
   "iot_class": "cloud_polling",
   "loggers": ["custom_components.wuyebao"],
   "requirements": [],
-  "version": "2.6.3"
+  "version": "2.6.4"
 }

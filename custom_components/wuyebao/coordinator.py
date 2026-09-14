@@ -171,6 +171,14 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         phone = str(self.entry.data.get(CONF_PHONE) or "") or None
 
         identities: list[tuple[str, str, str]] = []
+        # The app's cloud-intercom account is very likely the same as the
+        # owner account: username = phone/userId, password = the login
+        # password the user entered (not the HTTP JWT). Test both.
+        login_pwd = getattr(self.api, "_password", None)
+        if phone and login_pwd:
+            identities.append(("phone+pwd", phone, login_pwd))
+        if user_id and login_pwd:
+            identities.append(("userId+pwd", user_id, login_pwd))
         if phone and token:
             identities.append(("phone+access", phone, token))
         if user_id and token:
@@ -273,7 +281,13 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         ok_reg = (user, secret)
 
             call_ids = (
-                [(ok_reg[0], ok_reg[1])] if ok_reg else [(u, s) for _l, u, s in identities]
+                [(ok_reg[0], ok_reg[1])]
+                if ok_reg
+                else [
+                    (u, s)
+                    for _l, u, s in identities
+                    if _l.endswith("+pwd")
+                ]
             )
             if not challenge:
                 # Without realm+nonce an authenticated INVITE is impossible and
