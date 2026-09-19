@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-import uuid
 from typing import Any
 
 import aiohttp
@@ -16,16 +15,9 @@ from .const import (
     API_GATES,
     DEFAULT_BASE_URL,
     DEFAULT_CLIENT_ID,
-    DEFAULT_SIP_SERVER,
-    DEFAULT_SIP_PORT,
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-DEFAULT_HEADERS = {
-    "content-type": "application/json;charset=UTF-8",
-    "User-Agent": "Dart/2.19 (dart:io)",
-}
 
 
 class PropertyBaoAuthError(Exception):
@@ -63,11 +55,6 @@ class PropertyBaoClient:
         self.community_id: str | None = None
         self.community_name: str | None = None
         self.community_code: int | None = None
-        self.sip_server: str = DEFAULT_SIP_SERVER
-        self.sip_port: int = DEFAULT_SIP_PORT
-        self.sip_token: str | None = None
-
-        self._device_uuid = uuid.uuid4().hex[:16]
 
     @property
     def access_token(self) -> str | None:
@@ -79,195 +66,159 @@ class PropertyBaoClient:
         """Return refresh token."""
         return self._refresh_token
 
-    async def login(self) -> None:
-        """Login with username and password."""
-        url = f"{self.base_url}{API_TOKEN}"
+    def _base_headers(self, token: str | None = None) -> dict[str, str]:
+        """Build base request headers."""
         headers = {
-            **DEFAULT_HEADERS,
+            "Accept": "application/json",
             "client_id": self.client_id,
         }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        token: str | None = None,
+        payload: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        """Perform a request and return decoded JSON."""
+        url = f"{self.base_url}{path}"
+        headers = self._base_headers(token)
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+
+        async with self._session.request(
+            method,
+            url,
+            headers=headers,
+            json=payload if payload is not None else None,
+            params=params,
+            ssl=False,
+        ) as resp:
+            data = await resp.json(content_type=None)
+
+            if isinstance(data, dict) and "code" in data:
+                code = data.get("code")
+                try:
+                    code_int = int(code)
+                except (TypeError, ValueError):
+                    code_int = None
+
+                if code_int not in (0,):
+                    if code_int == 1003:
+                        raise PropertyBaoAuthError("帐号或密码错误")
+                    if resp.status == 401 or code_int == 1001:
+                        raise PropertyBaoAuthError("令牌无效或已过期")
+                    raise PropertyBaoApiError(
+                        f"API error: code {code}: {str(data.get('data'))[:200]}"
+                    )
+
+            if resp.status >= 400:
+                raise PropertyBaoApiError(f"HTTP {resp.status}")
+
+            return data
+
+    async def login(self) -> None:
+        """Login with username and password."""
         payload = {
-            "account": self.username,
+            "username": self.username,
             "password": self.password,
-            "uuid": self._device_uuid,
         }
 
-        _LOGGER.debug("Logging in to %s", url)
-        async with self._session.post(url, json=payload, headers=headers, ssl=False) as resp:
-            data = await resp.json()
+        _LOGGER.debug("Logging in...")
+        data = await self._request("POST", API_TOKEN, payload=payload)
 
-            if data.get("code") not in (0, 200):
-                raise PropertyBaoAuthError(data.get("data", "Login failed"))
+        self._access_token = self._find_token(data)
+        self._refresh_token = self._find_refresh_token(data)
 
-            result = data.get("data", data)
-            self._access_token = result.get("access_token")
-            self._refresh_token = result.get("refresh_token")
-            self._token_expires = int(time.time()) + 7 * 24 * 3600
+        if not self._access_token:
+            raise PropertyBaoAuthError("登录失败：未返回 accessToken")
 
-            # Decode user ID from JWT
-            if self._access_token:
-                import base64
-                parts = self._access_token.split(".")
-                if len(parts) >= 2:
-                    payload_b64 = parts[1] + "=" * (4 - len(parts[1]) % 4)
-                    token_data = json.loads(base64.urlsafe_b64decode(payload_b64))
-                    self.user_id = str(token_data.get("id"))
+        self._token_expires = int(time.time()) + 7 * 24 * 3600
+        _LOGGER.info("Login successful")
 
-        # Get community info (optional, don't fail login if this fails)
+        # Get community info (optional)
         try:
             await self.get_owner_community()
         except Exception as err:
-            _LOGGER.warning("Failed to get owner community info: %s", err)
+            _LOGGER.warning("Failed to get community info: %s", err)
 
     async def refresh_access_token(self) -> None:
         """Refresh access token."""
         if not self._refresh_token:
             raise PropertyBaoAuthError("No refresh token available")
 
-        url = f"{self.base_url}{API_REFRESH_TOKEN}"
-        headers = {
-            **DEFAULT_HEADERS,
-            "client_id": self.client_id,
-        }
-        payload = {"refresh_token": self._refresh_token}
+        params = {"refreshToken": self._refresh_token}
+        data = await self._request("GET", API_REFRESH_TOKEN, params=params)
 
-        async with self._session.post(url, json=payload, headers=headers, ssl=False) as resp:
-            data = await resp.json()
+        new_token = self._find_token(data)
+        new_refresh = self._find_refresh_token(data)
 
-            if data.get("code") not in (0, 200):
-                raise PropertyBaoAuthError(data.get("data", "Token refresh failed"))
+        if not new_token:
+            raise PropertyBaoAuthError("Refresh failed: no access token")
 
-            result = data.get("data", data)
-            self._access_token = result.get("access_token")
-            self._refresh_token = result.get("refresh_token")
-            self._token_expires = int(time.time()) + 7 * 24 * 3600
+        self._access_token = new_token
+        self._refresh_token = new_refresh or self._refresh_token
+        self._token_expires = int(time.time()) + 7 * 24 * 3600
 
-    async def _request(
-        self,
-        method: str,
-        endpoint: str,
-        params: dict | None = None,
-        json: dict | list | None = None,
-    ) -> Any:
-        """Make an authenticated request."""
-        # Auto refresh token
-        if self._access_token and self._token_expires < time.time() + 300:
-            try:
-                await self.refresh_access_token()
-            except PropertyBaoAuthError:
-                await self.login()
+    def _find_token(self, data: Any) -> str | None:
+        """Find access token in response."""
+        return self._find_key(data, ("accessToken", "access_token", "token"))
 
-        url = f"{self.base_url}{endpoint}"
-        headers = {
-            **DEFAULT_HEADERS,
-            "client_id": self.client_id,
-            "Authorization": f"Bearer {self._access_token}",
-        }
+    def _find_refresh_token(self, data: Any) -> str | None:
+        """Find refresh token in response."""
+        return self._find_key(data, ("refreshToken", "refresh_token"))
 
-        async with self._session.request(
-            method, url, params=params, json=json, headers=headers, ssl=False
-        ) as resp:
-            data = await resp.json()
-
-            if data.get("code") == 401:
-                await self.login()
-                headers["Authorization"] = f"Bearer {self._access_token}"
-                async with self._session.request(
-                    method, url, params=params, json=json, headers=headers, ssl=False
-                ) as resp:
-                    data = await resp.json()
-
-            if data.get("code") not in (0, 200):
-                raise PropertyBaoApiError(data.get("data", "API error"))
-
-            return data.get("data", data)
+    def _find_key(self, data: Any, keys: tuple[str, ...], depth: int = 0) -> str | None:
+        """Recursively find a key in data."""
+        if data is None or depth > 5:
+            return None
+        if isinstance(data, dict):
+            for key in keys:
+                val = data.get(key)
+                if isinstance(val, str) and val:
+                    return val
+            for val in data.values():
+                found = self._find_key(val, keys, depth + 1)
+                if found:
+                    return found
+        elif isinstance(data, list):
+            for item in data:
+                found = self._find_key(item, keys, depth + 1)
+                if found:
+                    return found
+        return None
 
     async def get_owner_community(self) -> list[dict[str, Any]]:
-        """Get owner community info (anonymous endpoint)."""
-        url = f"{self.base_url}{API_OWNER_COMMUNITY}"
+        """Get owner community info."""
         params = {"phoneNumber": self.username}
+        data = await self._request("GET", API_OWNER_COMMUNITY, params=params)
 
-        async with self._session.get(
-            url, params=params, headers=DEFAULT_HEADERS, ssl=False
-        ) as resp:
-            data = await resp.json()
-
-            if data.get("code") not in (0, 200):
-                raise PropertyBaoApiError(data.get("data", "Failed to get owner info"))
-
-            result = data.get("data", [])
-            if result:
-                owner = result[0] if isinstance(result, list) else result
+        raw = data.get("data", data)
+        if isinstance(raw, list):
+            if raw:
+                owner = raw[0]
                 self.community_id = str(owner.get("communityId", ""))
                 self.community_name = owner.get("communityName", "")
                 self.community_code = owner.get("communityCode")
                 self.owner_id = str(owner.get("id", ""))
+            return raw
+        return []
 
-            return result if isinstance(result, list) else []
+    async def get_gates(self) -> list[dict[str, Any]]:
+        """Get gate list."""
+        params = {}
+        if self.community_id:
+            params["communityId"] = self.community_id
 
-    async def get_gates(self, unit_id: str | None = None) -> list[dict[str, Any]]:
-        """Get gate/device list."""
-        params = {
-            "communityId": self.community_id,
-            "type": "indoor",
-        }
-        if unit_id:
-            params["unitId"] = unit_id
-
-        result = await self._request("GET", API_GATES, params=params)
-        return result if isinstance(result, list) else []
-
-    def _build_sip_target(self, gate: dict[str, Any]) -> str:
-        """Build SIP target address from gate info.
-
-        Wall gates: GT-{communityCode}-{areaCode}-0-0-0-{deviceNumber}
-        Outdoor gates: OD-{communityCode}-{buildingCode}-{unitCode}-0-0-0
-        """
-        gate_type = gate.get("type", "outdoor")
-        community_code = self.community_code or gate.get("communityCode", 0)
-        device_number = gate.get("deviceNumber", "1")
-
-        if gate_type == "wall":
-            area_code = gate.get("areaCode", 1)
-            return f"GT-{community_code}-{area_code}-0-0-0-{device_number}"
-        else:
-            building_code = gate.get("buildingCode", 1)
-            unit_code = gate.get("unitCode", 1)
-            return f"OD-{community_code}-{building_code}-{unit_code}-0-0-0"
-
-    async def open_door_sip(self, gate: dict[str, Any]) -> bool:
-        """Open door via SIP MESSAGE.
-
-        Sends a SIP MESSAGE to the gate device with unlock command.
-        Requires pjsua2 library for SIP stack.
-        """
-        target = self._build_sip_target(gate)
-        gate_type = gate.get("type", "outdoor")
-        device_number = gate.get("deviceNumber", "1")
-
-        message_body = json.dumps({
-            "id": str(uuid.uuid4()),
-            "type": "unlock",
-            "content": {
-                "device": gate_type,
-                "ownerId": self.owner_id or self.user_id,
-                "deviceNumber": device_number,
-            }
-        })
-
-        _LOGGER.info("Sending SIP unlock to %s", target)
-        _LOGGER.debug("SIP message: %s", message_body)
-
-        # TODO: Implement SIP MESSAGE sending using pjsua2
-        # This is a placeholder - actual implementation requires SIP stack
-        _LOGGER.warning(
-            "SIP door open is not yet fully implemented. "
-            "Target: sip:%s@%s, Message: %s",
-            target,
-            self.sip_server,
-            message_body,
-        )
-        return True
+        data = await self._request("GET", API_GATES, token=self._access_token, params=params)
+        raw = data.get("data", data)
+        if isinstance(raw, list):
+            return raw
+        return []
 
     async def async_close(self) -> None:
         """Close the session."""
