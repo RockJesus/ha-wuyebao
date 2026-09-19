@@ -276,6 +276,23 @@ class WuyeBaoAPI:
             "参数均未通过。请确认配置中的小区 ID。"
         ) from last_error
 
+    async def get_call_records(self, token: str, community_id: str | None = None) -> dict:
+        """Fetch intercom call records (api/call/{pageNo}/{pageSize}/grant/calls).
+
+        The app logs every SIP call here; records may expose the real SIP
+        callee identifiers (callNumber / uri) used by the app.
+        """
+        params: dict[str, Any] = {}
+        if community_id:
+            params["communityId"] = community_id
+        try:
+            data = await self._request(
+                "GET", "api/call/1/50/grant/calls", token, params=params
+            )
+        except Exception as err:  # noqa: BLE001 - diagnostic only
+            return {"error": str(err)}
+        return data if isinstance(data, dict) else {"raw": str(data)[:500]}
+
     async def open_gate(self, token: str, gate_id: str) -> None:
         """Trigger the open-door action for a gate."""
         path = build_open_path(self._open_path, gate_id)

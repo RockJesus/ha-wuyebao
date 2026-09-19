@@ -56,6 +56,12 @@ SIP 服务器集群为 `sip.jhws.top:5060` / `sip.jhws.top:58583` / `new-sip.jhw
 > 因此本轮把「手机号/用户ID + 你在 HA 里填的登录密码」作为第一候选凭据
 > （accessToken 组合保留作对比）。
 
+> **呼叫记录诊断**：v2.6.5 起，每次点击开门会先调用
+> `GET api/call/1/50/grant/calls`（App 的 SIP 呼叫记录接口），把最近 50 条
+> 呼叫记录打到日志（搜索 `呼叫记录(诊断)`）。App 每次远程开门都会留下记录，
+> 里面可能直接包含 App 实际呼叫的 SIP 号码/账号——这是定位 SIP 目标与
+> 凭据的最快途径。
+
 > **为什么必须预置鉴权**：实测 JHCloud 的 OpenSIPS 代理对**不带鉴权的
 > REGISTER / INVITE 直接静默丢弃**（只有 OPTIONS 回 407），所以必须先拿
 > nonce、把 Digest 算好放进首包发出——否则 REGISTER/INVITE 永远是 status 0，

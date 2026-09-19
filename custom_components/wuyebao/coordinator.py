@@ -170,6 +170,16 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         phone = str(self.entry.data.get(CONF_PHONE) or "") or None
 
+        # Fetch intercom call records first: the app logs every SIP call
+        # here, so the records may expose the real callee identifiers
+        # (callNumber / uri / account) that the app uses.
+        community_id = str(self.entry.data.get(CONF_COMMUNITY_ID) or "") or None
+        try:
+            records = await self.api.get_call_records(token, community_id)
+        except Exception as err:  # noqa: BLE001
+            records = {"error": str(err)}
+        _LOGGER.info("呼叫记录(诊断): %s", str(records)[:2000])
+
         identities: list[tuple[str, str, str]] = []
         # The app's cloud-intercom account is very likely the same as the
         # owner account: username = phone/userId, password = the login
