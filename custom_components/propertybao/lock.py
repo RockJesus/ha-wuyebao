@@ -144,7 +144,7 @@ class PropertyBaoLock(LockEntity):
             self._attr_is_locked = False
             self.async_write_ha_state()
             self.hass.loop.call_later(10, self._set_locked)
-            _LOGGER.info("Door unlock command sent: %s", self.device_info.name)
+            _LOGGER.info("Door unlock command sent: %s", self._gate.get("alias", f"门禁-{self._gate.get('deviceNumber', 'unknown')}"))
         except Exception as err:
             _LOGGER.error("Failed to unlock door: %s", err)
             raise
