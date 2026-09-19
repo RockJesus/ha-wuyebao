@@ -293,6 +293,83 @@ class WuyeBaoAPI:
             return {"error": str(err)}
         return data if isinstance(data, dict) else {"raw": str(data)[:500]}
 
+    async def sip_token_diag(
+        self,
+        token: str,
+        raw: dict[str, Any] | None,
+        community_id: str | None = None,
+        call_number: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Probe the intercom call paths for a SIP-token / call-origination
+        interface.
+
+        The server answers POST api/call/grant/calls with HTTP code 500
+        ("服务器发生错误!") rather than 404, which proves the route exists and
+        only the parameters are wrong. The app fetches a dedicated SIP token
+        (SIP_ACCESS_TOKEN) before making calls; this endpoint is a strong
+        candidate for where that token comes from.
+        """
+        raw = raw or {}
+        gate_id = str(raw.get("id") or "") or None
+        gate_uid = str(raw.get("uid") or "") or None
+        device_number = str(raw.get("deviceNumber") or "") or None
+        community = community_id or str(raw.get("communityId") or "") or None
+
+        candidates: list[tuple[str, str, dict, dict]] = []
+
+        def add(method: str, path: str, params: dict | None = None, payload: dict | None = None):
+            candidates.append((method, path, params or {}, payload or {}))
+
+        for base in ("api/call/grant/calls", "api/call/1/1/grant/calls"):
+            add("POST", base)
+            if call_number and community:
+                add("POST", base, {}, {"callNumber": call_number, "communityId": community})
+            if gate_id and community:
+                add("POST", base, {}, {"gateId": gate_id, "communityId": community})
+            if gate_id and community:
+                add("POST", base, {}, {"id": gate_id, "communityId": community})
+            if gate_uid and community:
+                add("POST", base, {}, {"uid": gate_uid, "communityId": community})
+            if call_number and community:
+                add("GET", base, {"callNumber": call_number, "communityId": community})
+            if gate_id and community:
+                add("GET", base, {"gateId": gate_id, "communityId": community})
+            if device_number and call_number and community:
+                add(
+                    "POST",
+                    base,
+                    {},
+                    {
+                        "callNumber": call_number,
+                        "communityId": community,
+                        "deviceNumber": device_number,
+                    },
+                )
+
+        results: list[dict[str, Any]] = []
+        for method, path, params, payload in candidates:
+            entry: dict[str, Any] = {
+                "method": method,
+                "path": path,
+                "params": params,
+                "payload": {k: (v[:20] + "…" if isinstance(v, str) and len(v) > 20 else v) for k, v in payload.items()},
+            }
+            try:
+                data = await self._request(
+                    method, path, token=token, params=params or None, payload=payload or None
+                )
+                entry["ok"] = True
+                if isinstance(data, dict):
+                    entry["code"] = data.get("code")
+                    entry["data"] = str(data.get("data"))[:400]
+                else:
+                    entry["data"] = str(data)[:400]
+            except WuyeBaoConnectionError as err:
+                entry["ok"] = False
+                entry["error"] = str(err)[:300]
+            results.append(entry)
+        return results
+
     async def open_gate(self, token: str, gate_id: str) -> None:
         """Trigger the open-door action for a gate."""
         path = build_open_path(self._open_path, gate_id)

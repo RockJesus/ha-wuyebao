@@ -56,6 +56,17 @@ SIP 服务器集群为 `sip.jhws.top:5060` / `sip.jhws.top:58583` / `new-sip.jhw
 > 因此本轮把「手机号/用户ID + 你在 HA 里填的登录密码」作为第一候选凭据
 > （accessToken 组合保留作对比）。
 
+> **SIP 令牌接口探测（v2.6.7）**：`POST api/call/grant/calls` 返回
+> **code 500「服务器发生错误」而非 404** —— 说明该路由存在、只是参数不对，
+> 极可能是 App 获取 SIP 专用 token（`SIP_ACCESS_TOKEN`）的接口。因此：
+> - 每次开门诊断在 SIP 之前会先探测该路径（POST/GET × callNumber /
+>   gateId / id / uid / deviceNumber 等参数组合），若命中 code 0 且含
+>   token 字段，会自动作为 SIP 密码候选（`phone+sipToken` /
+>   `userId+sipToken` / `callNumber+sipToken`）加入注册探测；
+> - 同时精简 SIP 诊断耗时：REGISTER 只测标准 URI 变体、INVITE 只测高价值
+>   目标（callNumber / MN / gate_id / uid / bindingCode / deviceNumber）、
+>   new-sip.jhws.top 只做 OPTIONS（其 REGISTER/INVITE 多轮全被静默丢弃）。
+
 > **callNumber 突破（v2.6.6）**：呼叫记录接口返回了 App 的真实呼叫标识，
 > 格式为 `RM-<小区代码>-<区>-<栋>-<单元>-<楼层>-<设备号>`（如
 > `RM-840-1-4-2-24-2`）与 `MN-<小区代码>-0-0-0-0-<设备号>`（围墙机/大门）。

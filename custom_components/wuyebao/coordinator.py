@@ -141,7 +141,7 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return {ATTR_GATES: gates, ATTR_OWNER: owner, ATTR_LAST_OPEN: self.last_open}
 
     async def _sip_open_diag(
-        self, token: str, gate_id: str, raw: dict | None
+        self, token: str, gate_id: str, raw: dict | None, sip_token: str | None = None
     ) -> None:
         """Probe SIP registration and call candidates; log every outcome.
 
@@ -222,32 +222,30 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             identities.append(("callNumber+gate", call_number, gate_pwd))
         if phone and gate_pwd:
             identities.append(("phone+gate", phone, gate_pwd))
+        # A dedicated SIP token (if the call-path probe found one).
+        if sip_token:
+            if phone:
+                identities.append(("phone+sipToken", phone, sip_token))
+            if user_id:
+                identities.append(("userId+sipToken", user_id, sip_token))
+            if call_number:
+                identities.append(("callNumber+sipToken", call_number, sip_token))
 
         targets: list[tuple[str, str]] = []
-        if gate_uid:
-            targets.append(("uid", gate_uid))
-        targets.append(("gate_id", gate_id))
-        if device_number:
-            targets.append(("deviceNumber", device_number))
+        # High-value INVITE targets only (the full set was probed across
+        # earlier rounds without a single non-zero response; credentials are
+        # the deciding factor, and any valid target then answers non-zero).
         if call_number:
             targets.append(("callNumber", call_number))
         if mn_number:
             targets.append(("callNumber-MN", mn_number))
-        if building_id:
-            targets.append(("buildingId", building_id))
-        if unit_id:
-            targets.append(("unitId", unit_id))
-        if area_id:
-            targets.append(("areaId", area_id))
-        if community_code:
-            targets.append(("communityCode", community_code))
+        targets.append(("gate_id", gate_id))
+        if gate_uid:
+            targets.append(("uid", gate_uid))
         if binding_code:
             targets.append(("bindingCode", binding_code))
-        # Common prefixed forms (area/community + device number).
-        if device_number and area_code:
-            targets.append(("areaCode-deviceNumber", f"{area_code}-{device_number}"))
-        if device_number and community_code:
-            targets.append(("communityCode-deviceNumber", f"{community_code}-{device_number}"))
+        if device_number:
+            targets.append(("deviceNumber", device_number))
 
         servers = [
             ("new-sip.jhws.top", 58583),
@@ -293,35 +291,40 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 }
             )
 
+            # new-sip.jhws.top answers OPTIONS with 484 and has silently
+            # dropped every REGISTER/INVITE across all rounds; probe it only.
+            if host.startswith("new-sip."):
+                return log
+
             ok_reg: tuple[str, str] | None = None
             for label, user, secret in identities:
                 if not user or not secret:
                     continue
-                # Two Request-URI forms: user-less (standard registrar URI)
-                # and user-qualified (some endpoints reject the user-less one).
-                for vlabel, uri_user in (("std", None), ("user", user)):
-                    try:
-                        res = client.register(user, secret, challenge=challenge, uri_user=uri_user)
-                    except Exception as err:  # noqa: BLE001
-                        log.append(
-                            {
-                                "server": f"{host}:{port}",
-                                "step": f"register:{label}:{vlabel}",
-                                "error": str(err),
-                            }
-                        )
-                        continue
+                # Standard user-less registrar Request-URI only: the
+                # user-qualified variant was probed across multiple rounds
+                # with identical silent-drop results.
+                try:
+                    res = client.register(user, secret, challenge=challenge, uri_user=None)
+                except Exception as err:  # noqa: BLE001
                     log.append(
                         {
                             "server": f"{host}:{port}",
-                            "step": f"register:{label}:{vlabel}",
-                            "status": res.get("status"),
-                            "reason": res.get("reason"),
-                            "pwd": mask_secret(secret),
+                            "step": f"register:{label}:std",
+                            "error": str(err),
                         }
                     )
-                    if res.get("status") == 200 and ok_reg is None:
-                        ok_reg = (user, secret)
+                    continue
+                log.append(
+                    {
+                        "server": f"{host}:{port}",
+                        "step": f"register:{label}:std",
+                        "status": res.get("status"),
+                        "reason": res.get("reason"),
+                        "pwd": mask_secret(secret),
+                    }
+                )
+                if res.get("status") == 200 and ok_reg is None:
+                    ok_reg = (user, secret)
 
             call_ids = (
                 [(ok_reg[0], ok_reg[1])]
@@ -390,6 +393,31 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info("SIP 开门诊断结果: %s", json.dumps(log, ensure_ascii=False, default=str))
 
     @staticmethod
+    def _extract_sip_token(tok_diag: list[dict]) -> str | None:
+        """Look through the call-path probe results for a token-shaped value."""
+        keys = (
+            "sipToken", "sipAccessToken", "accessToken", "token",
+            "secret", "sipSecret", "password", "sipPassword", "credential",
+        )
+        for entry in tok_diag:
+            if not entry.get("ok"):
+                continue
+            data = entry.get("data") or ""
+            text = str(data)
+            for key in keys:
+                marker = f"'{key}':"
+                pos = text.find(marker)
+                if pos < 0:
+                    marker = f'"{key}":'
+                    pos = text.find(marker)
+                if pos >= 0:
+                    value = text[pos + len(marker):].strip().strip(chr(39) + chr(34)).split(',')[0]
+                    value = value.strip()
+                    if value and len(value) >= 8 and "{" not in value:
+                        return value
+        return None
+
+    @staticmethod
     def _derive_call_number(raw: dict | None) -> str | None:
         """Build the app-style intercom identifier:
         RM-<community>-<area>-<building>-<unit>-<floor>-<device>."""
@@ -450,8 +478,26 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     self._open_hit = best
                 else:
-                    # No HTTP endpoint: try the SIP cloud-intercom path.
-                    await self._sip_open_diag(token, gate_id, raw)
+                    # No HTTP endpoint: probe the call paths for a dedicated
+                    # SIP token, then try the SIP cloud-intercom path.
+                    sip_token: str | None = None
+                    try:
+                        tok_diag = await self.api.sip_token_diag(
+                            token,
+                            raw,
+                            community_id=self._community_id,
+                            call_number=self._last_call_number,
+                        )
+                        _LOGGER.info(
+                            "SIP令牌探测(诊断): %s",
+                            json.dumps(tok_diag, ensure_ascii=False, default=str),
+                        )
+                        sip_token = self._extract_sip_token(tok_diag)
+                        if sip_token:
+                            _LOGGER.info("SIP令牌探测: 疑似取得 SIP token (长度 %d)", len(sip_token))
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.warning("SIP令牌探测失败: %s", err)
+                    await self._sip_open_diag(token, gate_id, raw, sip_token)
                     result = "failed"
                     raise WuyeBaoConnectionError(
                         "HTTP 开门接口与候选方案均未成功，SIP 诊断结果见日志。"
