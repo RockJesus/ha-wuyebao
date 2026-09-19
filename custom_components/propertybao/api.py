@@ -1,6 +1,7 @@
 """API client for 物业宝."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -11,11 +12,15 @@ import aiohttp
 from .const import (
     API_TOKEN,
     API_REFRESH_TOKEN,
+    API_CLIENT_TOKEN,
     API_OWNER_COMMUNITY,
     API_GATES,
     DEFAULT_BASE_URL,
     DEFAULT_CLIENT_ID,
+    DEFAULT_SIP_CLIENT_ID,
+    DEFAULT_SIP_CLIENT_SECRET,
 )
+from .sip import PropertyBaoSipClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,18 +42,25 @@ class PropertyBaoClient:
         password: str,
         base_url: str = DEFAULT_BASE_URL,
         client_id: str = DEFAULT_CLIENT_ID,
+        sip_jwt: str | None = None,
+        sip_sid: str | None = None,
         session: aiohttp.ClientSession | None = None,
     ) -> None:
         """Initialize the API client."""
+        import uuid
+
         self.username = username
         self.password = password
         self.base_url = base_url.rstrip("/")
         self.client_id = client_id
+        self.sip_jwt = sip_jwt
+        self.sip_sid = sip_sid or uuid.uuid4().hex[:16]
         self._session = session or aiohttp.ClientSession()
 
         self._access_token: str | None = None
         self._refresh_token: str | None = None
         self._token_expires: int = 0
+        self._sip_token_expires: int = 0
 
         self.user_id: str | None = None
         self.owner_id: str | None = None
@@ -146,6 +158,36 @@ class PropertyBaoClient:
         except Exception as err:
             _LOGGER.warning("Failed to get community info: %s", err)
 
+        # Auto-obtain SIP token
+        try:
+            await self.refresh_sip_token()
+        except Exception as err:
+            _LOGGER.warning("Failed to get SIP token: %s", err)
+
+    async def refresh_sip_token(self) -> None:
+        """Auto-obtain SIP access token."""
+        headers = {
+            "Accept": "application/json",
+            "client_id": DEFAULT_SIP_CLIENT_ID,
+            "client_secret": DEFAULT_SIP_CLIENT_SECRET,
+            "encrypted": "false",
+        }
+
+        async with self._session.get(
+            f"{self.base_url}{API_CLIENT_TOKEN}",
+            headers=headers,
+            ssl=False,
+        ) as resp:
+            data = await resp.json(content_type=None)
+
+            if isinstance(data, dict) and data.get("code") == 0:
+                result = data.get("data", {})
+                self.sip_jwt = result.get("accessToken")
+                self._sip_token_expires = int(time.time()) + 7 * 24 * 3600
+                _LOGGER.info("SIP token refreshed successfully")
+            else:
+                raise PropertyBaoApiError(f"Failed to get SIP token: {data}")
+
     async def refresh_access_token(self) -> None:
         """Refresh access token."""
         if not self._refresh_token:
@@ -219,6 +261,55 @@ class PropertyBaoClient:
         if isinstance(raw, list):
             return raw
         return []
+
+    async def open_door_sip(self, gate: dict[str, Any]) -> dict[str, Any]:
+        """Open door via SIP MESSAGE."""
+        # Auto-refresh SIP token if expired
+        if not self.sip_jwt or self._sip_token_expires < time.time() + 300:
+            try:
+                await self.refresh_sip_token()
+            except Exception as err:
+                raise PropertyBaoApiError(f"Failed to refresh SIP token: {err}")
+
+        if not self.sip_jwt:
+            raise PropertyBaoApiError("SIP JWT not available")
+
+        community_code = str(gate.get("communityCode") or self.community_code or "0")
+        area_code = str(gate.get("areaCode") or "0")
+        building_code = str(gate.get("buildingCode") or "0")
+        unit_code = str(gate.get("unitCode") or "0")
+        floor_code = str(gate.get("floorCode") or "0")
+        device_number = str(gate.get("deviceNumber") or "")
+        device_type = str(gate.get("type") or "outdoor")
+
+        if not device_number or not self.owner_id:
+            raise PropertyBaoApiError(f"Missing required fields: deviceNumber={device_number}, owner_id={self.owner_id}")
+
+        def _do_unlock() -> dict[str, Any]:
+            client = PropertyBaoSipClient(
+                user=self.username,
+                jwt=self.sip_jwt,
+                sid=self.sip_sid,
+            )
+            return client.unlock(
+                owner_id=self.owner_id,
+                device_type=device_type,
+                device_number=device_number,
+                community_code=community_code,
+                area_code=area_code,
+                building_code=building_code,
+                unit_code=unit_code,
+                floor_code=floor_code,
+            )
+
+        result = await asyncio.to_thread(_do_unlock)
+
+        if not result.get("ok"):
+            raise PropertyBaoApiError(
+                f"SIP unlock failed: status={result.get('status')} error={result.get('error', '')}"
+            )
+
+        return result
 
     async def async_close(self) -> None:
         """Close the session."""

@@ -26,6 +26,9 @@ async def async_setup_entry(
     try:
         gates = await client.get_gates()
         _LOGGER.info("Found %d gates", len(gates))
+        # Log raw gates for debugging
+        for i, gate in enumerate(gates):
+            _LOGGER.debug("Gate %d: %s", i, gate)
     except Exception as err:
         _LOGGER.error("Failed to get gates: %s", err)
         gates = []
@@ -68,14 +71,14 @@ class PropertyBaoLock(LockEntity):
             "device_type": self._gate.get("type"),
             "device_number": self._gate.get("deviceNumber"),
             "community_id": self._gate.get("communityId"),
-            "unlock_password": self._gate.get("password"),
             "state": self._gate.get("state"),
         }
 
     async def async_unlock(self, **kwargs: Any) -> None:
         """Unlock the door via SIP MESSAGE."""
         try:
-            await self._client.open_door_sip(self._gate)
+            result = await self._client.open_door_sip(self._gate)
+            _LOGGER.info("SIP unlock result: %s", result)
             self._attr_is_locked = False
             self.async_write_ha_state()
             self.hass.loop.call_later(10, self._set_locked)

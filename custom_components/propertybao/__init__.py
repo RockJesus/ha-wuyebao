@@ -30,6 +30,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         await client.login()
         _LOGGER.info("Logged in as %s, community: %s", client.username, client.community_name)
+        _LOGGER.info("SIP token: %s", "obtained" if client.sip_jwt else "not available")
     except Exception as err:
         _LOGGER.error("Failed to login: %s", err)
         return False
