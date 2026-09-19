@@ -9,6 +9,8 @@ CONF_PASSWORD = "password"
 # Defaults
 DEFAULT_BASE_URL = "https://wuye.jhws.top"
 DEFAULT_CLIENT_ID = "984136508489469952"
+DEFAULT_SIP_SERVER = "new-sip.jhws.top"
+DEFAULT_SIP_PORT = 58583
 
 # API Endpoints
 API_TOKEN = "/api/client/anon/token"

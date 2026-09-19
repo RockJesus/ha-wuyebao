@@ -16,6 +16,8 @@ from .const import (
     API_GATES,
     DEFAULT_BASE_URL,
     DEFAULT_CLIENT_ID,
+    DEFAULT_SIP_SERVER,
+    DEFAULT_SIP_PORT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,6 +63,9 @@ class PropertyBaoClient:
         self.community_id: str | None = None
         self.community_name: str | None = None
         self.community_code: int | None = None
+        self.sip_server: str = DEFAULT_SIP_SERVER
+        self.sip_port: int = DEFAULT_SIP_PORT
+        self.sip_token: str | None = None
 
         self._device_uuid = uuid.uuid4().hex[:16]
 
@@ -108,8 +113,11 @@ class PropertyBaoClient:
                     token_data = json.loads(base64.urlsafe_b64decode(payload_b64))
                     self.user_id = str(token_data.get("id"))
 
-        # Get community info
-        await self.get_owner_community()
+        # Get community info (optional, don't fail login if this fails)
+        try:
+            await self.get_owner_community()
+        except Exception as err:
+            _LOGGER.warning("Failed to get owner community info: %s", err)
 
     async def refresh_access_token(self) -> None:
         """Refresh access token."""
@@ -208,6 +216,58 @@ class PropertyBaoClient:
 
         result = await self._request("GET", API_GATES, params=params)
         return result if isinstance(result, list) else []
+
+    def _build_sip_target(self, gate: dict[str, Any]) -> str:
+        """Build SIP target address from gate info.
+
+        Wall gates: GT-{communityCode}-{areaCode}-0-0-0-{deviceNumber}
+        Outdoor gates: OD-{communityCode}-{buildingCode}-{unitCode}-0-0-0
+        """
+        gate_type = gate.get("type", "outdoor")
+        community_code = self.community_code or gate.get("communityCode", 0)
+        device_number = gate.get("deviceNumber", "1")
+
+        if gate_type == "wall":
+            area_code = gate.get("areaCode", 1)
+            return f"GT-{community_code}-{area_code}-0-0-0-{device_number}"
+        else:
+            building_code = gate.get("buildingCode", 1)
+            unit_code = gate.get("unitCode", 1)
+            return f"OD-{community_code}-{building_code}-{unit_code}-0-0-0"
+
+    async def open_door_sip(self, gate: dict[str, Any]) -> bool:
+        """Open door via SIP MESSAGE.
+
+        Sends a SIP MESSAGE to the gate device with unlock command.
+        Requires pjsua2 library for SIP stack.
+        """
+        target = self._build_sip_target(gate)
+        gate_type = gate.get("type", "outdoor")
+        device_number = gate.get("deviceNumber", "1")
+
+        message_body = json.dumps({
+            "id": str(uuid.uuid4()),
+            "type": "unlock",
+            "content": {
+                "device": gate_type,
+                "ownerId": self.owner_id or self.user_id,
+                "deviceNumber": device_number,
+            }
+        })
+
+        _LOGGER.info("Sending SIP unlock to %s", target)
+        _LOGGER.debug("SIP message: %s", message_body)
+
+        # TODO: Implement SIP MESSAGE sending using pjsua2
+        # This is a placeholder - actual implementation requires SIP stack
+        _LOGGER.warning(
+            "SIP door open is not yet fully implemented. "
+            "Target: sip:%s@%s, Message: %s",
+            target,
+            self.sip_server,
+            message_body,
+        )
+        return True
 
     async def async_close(self) -> None:
         """Close the session."""

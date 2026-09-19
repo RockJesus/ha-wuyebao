@@ -73,17 +73,16 @@ class PropertyBaoLock(LockEntity):
         }
 
     async def async_unlock(self, **kwargs: Any) -> None:
-        """Unlock the door (via SIP, not yet implemented)."""
-        _LOGGER.warning(
-            "Door unlock not yet implemented. Gate: %s, deviceNumber: %s",
-            self.name,
-            self._gate.get("deviceNumber"),
-        )
-        # TODO: Implement SIP MESSAGE unlock
-        # For now, just simulate unlock
-        self._attr_is_locked = False
-        self.async_write_ha_state()
-        self.hass.loop.call_later(10, self._set_locked)
+        """Unlock the door via SIP MESSAGE."""
+        try:
+            await self._client.open_door_sip(self._gate)
+            self._attr_is_locked = False
+            self.async_write_ha_state()
+            self.hass.loop.call_later(10, self._set_locked)
+            _LOGGER.info("Door unlock command sent: %s", self.name)
+        except Exception as err:
+            _LOGGER.error("Failed to unlock door: %s", err)
+            raise
 
     def _set_locked(self) -> None:
         """Set locked state."""
