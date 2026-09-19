@@ -1,0 +1,11 @@
+{
+  "domain": "propertybao",
+  "name": "物业宝",
+  "codeowners": ["@custom"],
+  "config_flow": true,
+  "documentation": "https://github.com/custom/propertybao",
+  "issue_tracker": "https://github.com/custom/propertybao/issues",
+  "requirements": [],
+  "version": "1.0.0",
+  "iot_class": "cloud_polling"
+}
