@@ -27,6 +27,8 @@ from .const import (
     CONF_OPEN_PATH,
     CONF_PASSWORD,
     CONF_PHONE,
+    CONF_SIP_JWT,
+    CONF_SIP_SID,
     CONF_POLL_INTERVAL,
     DEFAULT_BASE_URL,
     DEFAULT_CLIENT_ID,
@@ -339,6 +341,16 @@ class WuyeBaoOptionsFlow(OptionsFlow):
                         mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
+                vol.Optional(
+                    CONF_SIP_JWT,
+                    description={"suggested_value": opts.get(CONF_SIP_JWT, "")},
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(
+                    CONF_SIP_SID,
+                    description={"suggested_value": opts.get(CONF_SIP_SID, "")},
+                ): str,
             }
         )
         return self.async_show_form(

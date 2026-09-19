@@ -300,14 +300,16 @@ class WuyeBaoAPI:
         community_id: str | None = None,
         call_number: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Probe the intercom call paths for a SIP-token / call-origination
+        """Probe the intercom call paths for a call-origination / SIP-token
         interface.
 
-        The server answers POST api/call/grant/calls with HTTP code 500
-        ("服务器发生错误!") rather than 404, which proves the route exists and
-        only the parameters are wrong. The app fetches a dedicated SIP token
-        (SIP_ACCESS_TOKEN) before making calls; this endpoint is a strong
-        candidate for where that token comes from.
+        Field evidence: GET api/call/1/1/grant/calls?gateId=... returns code 0
+        and records, so the handler reads @RequestParam (query/form). Every
+        POST variant tried so far put its parameters in the JSON body and got
+        code 500, which means the POST handler exists but never saw its
+        parameters. This probe therefore sends parameters as query strings,
+        and also tries callType / full-gate-record bodies (the app source
+        carries CALL_TYEP_NORMAL / CALL_TYEP_MONITOR / CallElevator).
         """
         raw = raw or {}
         gate_id = str(raw.get("id") or "") or None
@@ -321,30 +323,31 @@ class WuyeBaoAPI:
             candidates.append((method, path, params or {}, payload or {}))
 
         for base in ("api/call/grant/calls", "api/call/1/1/grant/calls"):
-            add("POST", base)
+            # 1) POST with query parameters (the likely @RequestParam contract)
             if call_number and community:
-                add("POST", base, {}, {"callNumber": call_number, "communityId": community})
+                add("POST", base, {"callNumber": call_number, "communityId": community})
             if gate_id and community:
-                add("POST", base, {}, {"gateId": gate_id, "communityId": community})
+                add("POST", base, {"gateId": gate_id, "communityId": community})
             if gate_id and community:
-                add("POST", base, {}, {"id": gate_id, "communityId": community})
-            if gate_uid and community:
-                add("POST", base, {}, {"uid": gate_uid, "communityId": community})
+                add("POST", base, {"id": gate_id, "communityId": community})
+            if device_number and community:
+                add("POST", base, {"deviceNumber": device_number, "communityId": community})
+            # 2) POST with callType (app constants: CALL_TYEP_NORMAL / MONITOR)
             if call_number and community:
-                add("GET", base, {"callNumber": call_number, "communityId": community})
-            if gate_id and community:
-                add("GET", base, {"gateId": gate_id, "communityId": community})
-            if device_number and call_number and community:
-                add(
-                    "POST",
-                    base,
-                    {},
-                    {
-                        "callNumber": call_number,
-                        "communityId": community,
-                        "deviceNumber": device_number,
-                    },
-                )
+                add("POST", base, {}, {"callNumber": call_number, "communityId": community, "callType": "NORMAL"})
+                add("POST", base, {}, {"callNumber": call_number, "communityId": community, "callType": 0})
+                add("POST", base, {}, {"callNumber": call_number, "communityId": community, "callType": "CALL_TYEP_NORMAL"})
+            # 3) POST the whole gate record (Spring DTO may want it all)
+            if gate_id:
+                full = {k: v for k, v in raw.items()}
+                if community and "communityId" not in full:
+                    full["communityId"] = community
+                add("POST", base, {}, full)
+
+        # 4) GET the full (50) call records for this gate, data kept long.
+        if gate_id and community:
+            add("GET", "api/call/1/50/grant/calls", {"gateId": gate_id, "communityId": community})
+            add("GET", "api/call/1/50/grant/calls", {"gateId": gate_id, "communityId": community, "callNumber": call_number or ""})
 
         results: list[dict[str, Any]] = []
         for method, path, params, payload in candidates:
@@ -352,7 +355,7 @@ class WuyeBaoAPI:
                 "method": method,
                 "path": path,
                 "params": params,
-                "payload": {k: (v[:20] + "…" if isinstance(v, str) and len(v) > 20 else v) for k, v in payload.items()},
+                "payload": {k: (str(v)[:20] + "…" if isinstance(v, str) and len(str(v)) > 20 else v) for k, v in payload.items()},
             }
             try:
                 data = await self._request(
@@ -361,9 +364,11 @@ class WuyeBaoAPI:
                 entry["ok"] = True
                 if isinstance(data, dict):
                     entry["code"] = data.get("code")
-                    entry["data"] = str(data.get("data"))[:400]
+                    # Keep the record list long enough to inspect all fields.
+                    text = str(data.get("data"))
+                    entry["data"] = text[:3000]
                 else:
-                    entry["data"] = str(data)[:400]
+                    entry["data"] = str(data)[:1000]
             except WuyeBaoConnectionError as err:
                 entry["ok"] = False
                 entry["error"] = str(err)[:300]

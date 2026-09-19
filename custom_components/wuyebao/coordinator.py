@@ -25,9 +25,11 @@ from .const import (
     CONF_COMMUNITY_FIELD,
     CONF_COMMUNITY_ID,
     CONF_PHONE,
+    CONF_SIP_JWT,
+    CONF_SIP_SID,
     DOMAIN,
 )
-from .sip import SipClient, mask_secret
+from .sip import JHSipClient, mask_secret
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -432,6 +434,79 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             segs.append(part if part is not None else "0")
         return f"RM-{'-'.join(segs)}-{device_number}"
 
+    async def _sip_unlock(self, gate_id: str, raw: dict | None) -> dict:
+        """Open a gate via the reverse-engineered SIP MESSAGE protocol.
+
+        Protocol (pcap-verified 2026-09-19):
+          REGISTER sip:new-sip.jhws.top;transport=tcp
+            From: <sip:<phone>@jhws.top>
+            SID: <client sid>
+            JWT: <client-token JWT>
+          MESSAGE sip:GT-<communityCode>-<areaCode>-<buildingCode>-<unitCode>-<floorCode>-<deviceNumber>@jhws.top
+            Route: <sip:new-sip.jhws.top;transport=tcp;lr>
+            Body: {"id":"<uuid>","type":"unlock",
+                   "content":{"device":"wall|outdoor",
+                              "ownerId":"<owner record id>",
+                              "deviceNumber":"<deviceNumber>"}}
+        """
+        raw = raw or {}
+        phone = str(self.entry.data.get(CONF_PHONE) or "")
+        sip_jwt = str(self.entry.data.get(CONF_SIP_JWT) or "")
+        sip_sid = str(self.entry.data.get(CONF_SIP_SID) or "")
+        if not phone or not sip_jwt or not sip_sid:
+            return {
+                "ok": False,
+                "status": 0,
+                "error": "缺少 SIP 凭据：请在集成选项中填写 sip_jwt 和 sip_sid",
+            }
+
+        # Gate identity fields
+        community_code = str(raw.get("communityCode") or "0")
+        area_code = str(raw.get("areaCode") or "0")
+        building_code = str(raw.get("buildingCode") or "0")
+        unit_code = str(raw.get("unitCode") or "0")
+        floor_code = str(raw.get("floorCode") or "0")
+        device_number = str(raw.get("deviceNumber") or "")
+        # App uses type=="wall" for perimeter gates, "outdoor" for unit entrances.
+        device_type = str(raw.get("type") or "outdoor")
+        # ownerId is the owner record's id (NOT bindingId).
+        owners = self.data.get(ATTR_OWNER) if self.data else None
+        owner_id = ""
+        if isinstance(owners, dict):
+            owner_id = str(owners.get("id") or owners.get("userId") or "")
+
+        if not device_number or not owner_id:
+            return {
+                "ok": False,
+                "status": 0,
+                "error": (
+                    f"门禁数据缺字段: deviceNumber={device_number!r} owner_id={owner_id!r}"
+                ),
+            }
+
+        def _do() -> dict:
+            client = JHSipClient(
+                user=phone,
+                jwt=sip_jwt,
+                sid=sip_sid,
+            )
+            return client.unlock(
+                gate=raw,
+                owner_id=owner_id,
+                device=device_type,
+                device_number=device_number,
+                community_code=community_code,
+                area_code=area_code,
+                building_code=building_code,
+                unit_code=unit_code,
+                floor_code=floor_code,
+            )
+
+        try:
+            return await asyncio.to_thread(_do)
+        except Exception as err:  # noqa: BLE001
+            return {"ok": False, "status": 0, "error": f"exception: {err!r}"}
+
     async def open_gate(self, gate_id: str) -> None:
         """Open a gate and record the result.
 
@@ -497,12 +572,30 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             _LOGGER.info("SIP令牌探测: 疑似取得 SIP token (长度 %d)", len(sip_token))
                     except Exception as err:  # noqa: BLE001
                         _LOGGER.warning("SIP令牌探测失败: %s", err)
-                    await self._sip_open_diag(token, gate_id, raw, sip_token)
-                    result = "failed"
-                    raise WuyeBaoConnectionError(
-                        "HTTP 开门接口与候选方案均未成功，SIP 诊断结果见日志。"
-                        "若 SIP 注册/呼叫状态为 200，请把日志发给维护者确认凭据组合。"
-                    )
+                    # HTTP endpoint does not exist (all 404). The app opens
+                    # doors over SIP MESSAGE with JWT auth (see sip.py). Use the
+                    # credentials the user supplied in the integration options.
+                    sip_result = await self._sip_unlock(gate_id, raw)
+                    if sip_result.get("ok"):
+                        result = "success"
+                        _LOGGER.info(
+                            "SIP 开门成功: %s (status=%s, GT=%s)",
+                            sip_result.get("gt_uri"),
+                            sip_result.get("status"),
+                            sip_result.get("gt_uri"),
+                        )
+                    else:
+                        result = "failed"
+                        _LOGGER.warning(
+                            "SIP 开门失败: status=%s error=%s",
+                            sip_result.get("status"),
+                            sip_result.get("error") or sip_result.get("raw", "")[:500],
+                        )
+                        raise WuyeBaoConnectionError(
+                            f"SIP 开门失败: status={sip_result.get('status')} "
+                            f"reason={sip_result.get('reason')}. "
+                            "请检查配置中的 SIP JWT/SID 是否有效（JWT 约 7 天过期）。"
+                        )
         except WuyeBaoAuthError:
             self._access_token = None
             try:

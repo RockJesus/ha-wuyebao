@@ -1,30 +1,42 @@
-"""Minimal UDP SIP client for the JHCloud cloud-intercom open-door path.
+"""JHCloud SIP client: JWT-authenticated REGISTER + MESSAGE unlock.
 
-The official 物业宝 app opens doors over SIP (OpenSIPS proxy at
-new-sip.jhws.top:58583, realm "new-sip.jhws.top", Digest/Proxy auth).
-This module implements just enough SIP (OPTIONS / REGISTER / INVITE with
-Digest-MD5 Proxy-Authorization) to discover the working credentials and the
-callee identity in the user's environment. No external SIP library is needed.
+Reverse-engineered from the official 物业宝 app (MuMu pcap capture,
+2026-09-19). The real cloud-intercom protocol is:
 
-Security: credentials are used only inside the user's Home Assistant; log
-output is masked.
+  * Server ....... new-sip.jhws.top:58583 (TCP, OpenSIPS 2.1.2)
+  * Realm/AOR .... jhws.top (NOT new-sip.jhws.top / sip.jhws.top)
+  * User ......... <phone>@jhws.top
+  * Auth ......... custom headers, NOT Digest:
+                     SID: <16-hex client session id>
+                     JWT: <client-token JWT, scope=["read"], ~7-day expiry>
+  * Open door .... SIP MESSAGE (NOT INVITE) to
+                     sip:GT-<communityCode>-<areaCode>-<buildingCode>-<unitCode>-<floorCode>-<deviceNumber>@jhws.top
+                   with body:
+                     {"id":"<uuid>","type":"unlock",
+                      "content":{"device":"wall|outdoor",
+                                 "ownerId":"<owner record id>",
+                                 "deviceNumber":"<deviceNumber>"}}
+  * Route header .. <sip:new-sip.jhws.top;transport=tcp;lr>
+
+Security: secrets stay inside the user's HA; logs mask them.
 """
 
 from __future__ import annotations
 
-import hashlib
+import json
 import logging
-import re
 import socket
 import time
+import uuid
 
 _LOGGER = logging.getLogger(__name__)
 
 SIP_DEFAULT_HOST = "new-sip.jhws.top"
 SIP_DEFAULT_PORT = 58583
-SIP_TIMEOUT = 6.0
-SIP_RETRIES = 2
-SIP_GAP = 1.0
+SIP_REALM = "jhws.top"
+SIP_ROUTE = "<sip:new-sip.jhws.top;transport=tcp;lr>"
+SIP_UA = "JHCloud-android-m-SV:1.0-V:1.1.1.51"
+SIP_TIMEOUT = 8.0
 
 
 def mask_secret(value: str | None) -> str:
@@ -36,70 +48,62 @@ def mask_secret(value: str | None) -> str:
     return f"{value[:8]}...{value[-4:]}"
 
 
-def _md5(text: str) -> str:
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
+def _gen_branch() -> str:
+    return "z9hG4bK" + uuid.uuid4().hex[:24]
 
 
-def build_digest_response(
-    username: str,
-    realm: str,
-    nonce: str,
-    password: str,
-    method: str,
-    uri: str,
-) -> str:
-    """RFC 2617 Digest (MD5, no qop) response value."""
-    ha1 = _md5(f"{username}:{realm}:{password}")
-    ha2 = _md5(f"{method}:{uri}")
-    return _md5(f"{ha1}:{nonce}:{ha2}")
+def _gen_tag() -> str:
+    return uuid.uuid4().hex[:16]
 
 
-def build_proxy_auth(
-    username: str,
-    realm: str,
-    nonce: str,
-    password: str,
-    method: str,
-    uri: str,
-) -> str:
-    response = build_digest_response(username, realm, nonce, password, method, uri)
-    return (
-        f'Proxy-Authorization: Digest username="{username}", realm="{realm}", '
-        f'nonce="{nonce}", uri="{uri}", response="{response}", algorithm=MD5'
-    )
+def _recv_full(sock: socket.socket, timeout: float) -> str:
+    """Read one complete SIP message (header + Content-Length body)."""
+    sock.settimeout(timeout)
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    head, _, body = buf.partition(b"\r\n\r\n")
+    content_length = 0
+    for line in head.split(b"\r\n"):
+        if line.lower().startswith(b"content-length:"):
+            try:
+                content_length = int(line.split(b":", 1)[1].strip())
+            except ValueError:
+                content_length = 0
+    while len(body) < content_length:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+        body = buf.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in buf else b""
+    return buf.decode("latin-1", errors="replace")
 
 
-def parse_status(resp: str) -> tuple[int, str]:
-    m = re.search(r"SIP/2\.0 (\d{3}) ?([^\r\n]*)", resp)
-    if not m:
-        return 0, ""
-    return int(m.group(1)), m.group(2).strip()
+class JHSipClient:
+    """Blocking TCP SIP client for the JHCloud open-door path.
 
-
-def parse_challenge(resp: str) -> tuple[str | None, str | None]:
-    m = re.search(r'(?:Proxy-|WWW-)?Authenticate: Digest realm="([^"]+)"', resp)
-    n = re.search(r'nonce="([^"]+)"', resp)
-    return (m.group(1) if m else None), (n.group(1) if n else None)
-
-
-class SipClient:
-    """A tiny blocking UDP SIP client (run via asyncio.to_thread in HA)."""
+    All methods are synchronous; call from asyncio.to_thread in HA.
+    """
 
     def __init__(
         self,
+        user: str,
+        jwt: str,
+        sid: str,
         host: str = SIP_DEFAULT_HOST,
         port: int = SIP_DEFAULT_PORT,
-        local_ip: str | None = None,
         timeout: float = SIP_TIMEOUT,
-        retries: int = SIP_RETRIES,
-        transport: str = "tcp",
     ) -> None:
+        self.user = user
+        self.jwt = jwt
+        self.sid = sid
         self.host = host
         self.port = port
         self.timeout = timeout
-        self.retries = retries
-        self.transport = transport.lower()
-        self.local_ip = local_ip or self._discover_local_ip()
+        self._local_ip = self._discover_local_ip()
 
     @staticmethod
     def _discover_local_ip() -> str:
@@ -113,197 +117,140 @@ class SipClient:
         except Exception:
             return "127.0.0.1"
 
-    def _build_message(
-        self,
-        method: str,
-        uri: str,
-        user: str,
-        cseq: int,
-        auth: str | None = None,
-        extra_headers: str = "",
-        to_user: str | None = None,
-    ) -> str:
-        transport = self.transport.upper()
-        contact_transport = ";transport=tcp" if self.transport == "tcp" else ""
-        # For INVITE the To header must be the callee (the door device), not
-        # the caller; for OPTIONS/REGISTER To equals the local identity.
-        to = to_user or user
+    # -- low-level --------------------------------------------------------
+
+    def _send_and_recv(self, sock: socket.socket, payload: str) -> tuple[int, str, str]:
+        sock.sendall(payload.encode("utf-8"))
+        reply = _recv_full(sock, self.timeout)
+        first_line = reply.split("\r\n", 1)[0] if reply else ""
+        code = 0
+        reason = ""
+        if first_line.startswith("SIP/2.0 "):
+            parts = first_line[8:].split(" ", 1)
+            try:
+                code = int(parts[0])
+            except ValueError:
+                code = 0
+            reason = parts[1].strip() if len(parts) > 1 else ""
+        return code, reason, reply
+
+    # -- public API -------------------------------------------------------
+
+    def register(self) -> dict:
+        """REGISTER with custom SID + JWT headers. Returns (ok, raw_reply)."""
+        branch = _gen_branch()
+        tag = _gen_tag()
+        call_id = uuid.uuid4().hex[:24]
+        contact = (
+            f"<sip:{self.user}@{self._local_ip}:5060;transport=TCP;ob>"
+        )
         lines = [
-            f"{method} {uri} SIP/2.0",
-            (
-                f"Via: SIP/2.0/{transport} {self.local_ip}:5060;"
-                f"branch=z9hG4bK-{int(time.time()*1000)}{cseq};rport"
-            ),
+            f"REGISTER sip:new-sip.jhws.top;transport=tcp SIP/2.0",
+            f"Via: SIP/2.0/TCP {self._local_ip}:5060;rport;branch={branch};alias",
+            f"Route: {SIP_ROUTE}",
             "Max-Forwards: 70",
-            f"From: <sip:{user}@{self.host}>;tag=t{cseq}",
-            f"To: <sip:{to}@{self.host}>",
-            f"Call-ID: wb-{int(time.time()*1000)}-{cseq}@{self.local_ip}",
-            f"CSeq: {cseq} {method}",
-            f"Contact: <sip:{user}@{self.local_ip}:5060{contact_transport}>",
-            "User-Agent: wuyebao-ha/2.6.3 (pjsua-compatible)",
+            f"From: <sip:{self.user}@{SIP_REALM}>;tag={tag}",
+            f"To: <sip:{self.user}@{SIP_REALM}>",
+            f"Call-ID: {call_id}",
+            "CSeq: 1 REGISTER",
+            f"SID: {self.sid}",
+            f"JWT: {self.jwt}",
+            f"User-Agent: {SIP_UA}",
+            f"Contact: {contact}",
+            "Expires: 300",
+            "Content-Length: 0",
+            "",
+            "",
         ]
-        if auth:
-            lines.append(auth)
-        if extra_headers:
-            lines.append(extra_headers)
-        lines.append("Content-Length: 0")
-        lines.append("")
-        # "\r\n".join([...]) already ends with "\r\n"; add one more blank line
-        # so the header/body separator (CRLF CRLF) is present.
-        return "\r\n".join(lines) + "\r\n"
-
-    def _exchange(self, payload: str) -> str:
-        """Send one SIP message over UDP or TCP and collect the response."""
-        if self.transport == "tcp":
-            return self._exchange_tcp(payload)
-        return self._exchange_udp(payload)
-
-    def _exchange_udp(self, payload: str) -> str:
-        """UDP variant of _exchange."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(self.timeout)
-        try:
-            last = ""
-            for _ in range(self.retries):
-                sock.sendto(payload.encode("utf-8"), (self.host, self.port))
-                chunks = []
-                try:
-                    while True:
-                        data, _addr = sock.recvfrom(65536)
-                        if not data:
-                            break
-                        chunks.append(data.decode("utf-8", "replace"))
-                        if len(b"".join(c.encode() for c in chunks)) > 30000:
-                            break
-                except socket.timeout:
-                    pass
-                last = "".join(chunks)
-                if last:
-                    return last
-                time.sleep(SIP_GAP)
-            return last
-        finally:
-            sock.close()
-
-    def _exchange_tcp(self, payload: str) -> str:
-        """TCP variant of _exchange (fresh connection per message)."""
+        payload = "\r\n".join(lines)
         try:
             sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         except OSError as err:
-            return f"ERROR: {err!r}"
-        sock.settimeout(self.timeout)
+            return {"ok": False, "status": 0, "error": f"connect: {err!r}"}
         try:
-            sock.sendall(payload.encode("utf-8"))
-            chunks = []
+            code, reason, raw = self._send_and_recv(sock, payload)
+            return {
+                "ok": code == 200,
+                "status": code,
+                "reason": reason,
+                "raw": raw,
+                "_sock": sock,  # keep open for MESSAGE
+            }
+        except OSError as err:
             try:
-                while True:
-                    data = sock.recv(65536)
-                    if not data:
-                        break
-                    chunks.append(data.decode("utf-8", "replace"))
-                    if len(b"".join(c.encode() for c in chunks)) > 30000:
-                        break
-            except socket.timeout:
+                sock.close()
+            finally:
                 pass
-            return "".join(chunks)
-        finally:
-            sock.close()
+            return {"ok": False, "status": 0, "error": f"recv: {err!r}"}
 
-    def _request(
+    def unlock(
         self,
-        method: str,
-        uri: str,
-        user: str,
-        password: str | None,
-        cseq: int,
-        extra_headers: str = "",
-        challenge: tuple[str, str] | None = None,
-        to_user: str | None = None,
-    ) -> tuple[int, str, dict]:
-        """Send a request; on 407/401 challenge, retry once with Digest auth.
+        gate: dict,
+        owner_id: str,
+        device: str,
+        device_number: str,
+        community_code: str,
+        area_code: str = "0",
+        building_code: str = "0",
+        unit_code: str = "0",
+        floor_code: str = "0",
+    ) -> dict:
+        """Send SIP MESSAGE unlock over a fresh connection (REGISTER + MESSAGE)."""
+        # 1) REGISTER
+        reg = self.register()
+        if not reg.get("ok"):
+            return reg
+        sock = reg.get("_sock")
+        if sock is None:
+            return {"ok": False, "status": 0, "error": "no socket after REGISTER"}
 
-        If `challenge=(realm, nonce)` is given, the request is sent once with
-        a pre-computed Proxy-Authorization header instead (needed because the
-        JHCloud OpenSIPS proxy silently drops unauthenticated REGISTER/INVITE).
-
-        Returns (status_code, reason, info) where info carries challenge
-        details, the masked credential used, etc.
-        """
-        if challenge:
-            realm, nonce = challenge
-            if realm and nonce and password:
-                auth = build_proxy_auth(user, realm, nonce, password, method, uri)
-                resp = self._exchange(
-                    self._build_message(
-                        method, uri, user, cseq + 1, auth=auth, extra_headers=extra_headers, to_user=to_user
-                    )
-                )
-                status, reason = parse_status(resp)
-                return (
-                    status,
-                    reason,
-                    {"raw": resp, "realm": realm, "nonce": nonce, "preauth": True},
-                )
-        first = self._exchange(self._build_message(method, uri, user, cseq))
-        status, reason = parse_status(first)
-        if status not in (401, 407):
-            return status, reason, {"raw": first}
-
-        realm, nonce = parse_challenge(first)
-        info = {"challenge": f"{status}", "realm": realm, "nonce": nonce}
-        if realm and nonce and password:
-            auth = build_proxy_auth(user, realm, nonce, password, method, uri)
-            second = self._exchange(
-                self._build_message(method, uri, user, cseq + 1, auth=auth, extra_headers=extra_headers, to_user=to_user)
+        try:
+            # 2) MESSAGE
+            gt_uri = (
+                f"GT-{community_code}-{area_code}-{building_code}-"
+                f"{unit_code}-{floor_code}-{device_number}"
             )
-            status, reason = parse_status(second)
-            info["raw"] = second
-            return status, reason, info
-        info["raw"] = first
-        return status, reason, info
-
-    def options(self, user: str, password: str | None = None) -> dict:
-        uri = f"sip:{self.host}"
-        status, reason, info = self._request("OPTIONS", uri, user, password, 1)
-        return {"method": "OPTIONS", "status": status, "reason": reason, **info}
-
-    def register(
-        self,
-        user: str,
-        password: str | None = None,
-        challenge: tuple[str, str] | None = None,
-        uri_user: str | None = None,
-    ) -> dict:
-        """REGISTER. If challenge=(realm, nonce) is supplied, the message is
-        sent with a pre-computed Proxy-Authorization header (the OpenSIPS
-        proxy silently drops unauthenticated REGISTER, so the standard
-        challenge-then-retry flow never completes for REGISTER/INVITE).
-        `uri_user` switches the Request-URI to sip:<uri_user>@host (some
-        endpoints answer 484/404 for a user-less registrar URI)."""
-        uri = f"sip:{uri_user or ''}@{self.host}" if uri_user else f"sip:{self.host}"
-        status, reason, info = self._request(
-            "REGISTER", uri, user, password, 1, challenge=challenge
-        )
-        return {"method": "REGISTER", "status": status, "reason": reason, **info}
-
-    def invite(
-        self,
-        from_user: str,
-        password: str | None,
-        to_uri: str,
-        cseq: int = 1,
-        challenge: tuple[str, str] | None = None,
-    ) -> dict:
-        sdp = (
-            "Content-Type: application/sdp\r\n\r\n"
-            "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\n"
-            "t=0 0\r\nm=audio 4000 RTP/AVP 0 8 18 101\r\n"
-            "a=rtpmap:101 telephone-event/8000\r\n"
-        )
-        # The To header must name the callee (target user of to_uri).
-        m = re.match(r"sip:([^@]+)@", to_uri)
-        to_user = m.group(1) if m else from_user
-        status, reason, info = self._request(
-            "INVITE", to_uri, from_user, password, cseq, extra_headers=sdp, challenge=challenge, to_user=to_user
-        )
-        return {"method": "INVITE", "status": status, "reason": reason, **info}
+            body = json.dumps(
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "unlock",
+                    "content": {
+                        "device": device,
+                        "ownerId": str(owner_id),
+                        "deviceNumber": str(device_number),
+                    },
+                },
+                separators=(",", ":"),
+            )
+            branch = _gen_branch()
+            tag = _gen_tag()
+            call_id = uuid.uuid4().hex[:24]
+            lines = [
+                f"MESSAGE sip:{gt_uri}@{SIP_REALM} SIP/2.0",
+                f"Via: SIP/2.0/TCP {self._local_ip}:5060;rport;branch={branch};alias",
+                "Max-Forwards: 70",
+                f"From: <sip:{self.user}@{SIP_REALM}>;tag={tag}",
+                f"To: <sip:{gt_uri}@{SIP_REALM}>",
+                f"Call-ID: {call_id}",
+                "CSeq: 2 MESSAGE",
+                f"Route: {SIP_ROUTE}",
+                f"User-Agent: {SIP_UA}",
+                "Content-Type: text/plain",
+                f"Content-Length: {len(body)}",
+                "",
+                body,
+            ]
+            payload = "\r\n".join(lines)
+            code, reason, raw = self._send_and_recv(sock, payload)
+            return {
+                "ok": code == 200,
+                "status": code,
+                "reason": reason,
+                "raw": raw,
+                "gt_uri": gt_uri,
+            }
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass

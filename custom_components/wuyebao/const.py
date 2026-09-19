@@ -30,6 +30,12 @@ CONF_POLL_INTERVAL = "poll_interval"
 CONF_COMMUNITY_ID = "community_id"
 CONF_COMMUNITY_NAME = "community_name"
 CONF_COMMUNITY_FIELD = "community_field"
+# SIP cloud-intercom credentials (captured via pcap; see sip.py).
+# The app authenticates SIP REGISTER with custom SID + JWT headers instead
+# of Digest. The JWT is the anonymous client_token (scope=["read"],
+# ~7-day expiry) obtained from POST /api/client/anon/client_token.
+CONF_SIP_JWT = "sip_jwt"
+CONF_SIP_SID = "sip_sid"
 
 # --------------------------------------------------------------------------
 # Verified JHCloud API paths

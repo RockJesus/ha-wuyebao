@@ -56,6 +56,15 @@ SIP 服务器集群为 `sip.jhws.top:5060` / `sip.jhws.top:58583` / `new-sip.jhw
 > 因此本轮把「手机号/用户ID + 你在 HA 里填的登录密码」作为第一候选凭据
 > （accessToken 组合保留作对比）。
 
+> **POST 参数形式修正（v2.6.8）**：`GET api/call/1/1/grant/calls?gateId=...`
+> 实测返回 code 0 与记录，证明 handler 走 **@RequestParam（query/form）**，
+> 之前所有 POST 把参数放在 JSON body 导致服务器 500。v2.6.8 的探测改为：
+> POST 参数走 **query**（callNumber/gateId/id/deviceNumber）、body 增加
+> **callType**（App 常量 `CALL_TYEP_NORMAL`/`CALL_TYEP_MONITOR`）、并直接
+> **POST 完整门禁对象**；同时新增 `GET api/call/1/50/grant/calls?gateId=`
+> 拉取该门禁**全部**呼叫记录（完整字段、不截断），用于核对 App 真实呼叫
+> 的账号与目标。
+
 > **SIP 令牌接口探测（v2.6.7）**：`POST api/call/grant/calls` 返回
 > **code 500「服务器发生错误」而非 404** —— 说明该路由存在、只是参数不对，
 > 极可能是 App 获取 SIP 专用 token（`SIP_ACCESS_TOKEN`）的接口。因此：
