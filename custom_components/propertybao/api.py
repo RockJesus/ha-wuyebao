@@ -106,7 +106,7 @@ class PropertyBaoClient:
         """Login with username and password."""
         url = f"{self.base_url}{API_TOKEN}"
         headers = {
-            "Content-Type": "application/json",
+            "Content-Type": "application/json;charset=UTF-8",
             "client_id": self.client_id,
             "User-Agent": "Dart/2.19 (dart:io)",
         }
@@ -152,7 +152,7 @@ class PropertyBaoClient:
 
         url = f"{self.base_url}{API_REFRESH_TOKEN}"
         headers = {
-            "Content-Type": "application/json",
+            "Content-Type": "application/json;charset=UTF-8",
             "client_id": self.client_id,
             "User-Agent": "Dart/2.19 (dart:io)",
         }
@@ -197,7 +197,7 @@ class PropertyBaoClient:
             "User-Agent": "Dart/2.19 (dart:io)",
         }
         if json is not None:
-            headers["Content-Type"] = "application/json"
+            headers["Content-Type"] = "application/json;charset=UTF-8"
 
         async with self._session.request(
             method,
@@ -236,7 +236,7 @@ class PropertyBaoClient:
         result = await self._request(
             "GET",
             API_OWNER_COMMUNITY,
-            params={"phone": phone},
+            params={"phoneNumber": phone},
         )
         if result:
             if isinstance(result, list) and len(result) > 0:
