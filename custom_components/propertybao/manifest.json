@@ -1,11 +1,12 @@
 {
   "domain": "propertybao",
   "name": "物业宝",
-  "codeowners": ["@custom"],
+  "codeowners": ["@propertybao-ha"],
   "config_flow": true,
-  "documentation": "https://github.com/custom/propertybao",
-  "issue_tracker": "https://github.com/custom/propertybao/issues",
+  "documentation": "https://github.com/propertybao-ha/propertybao-ha",
+  "issue_tracker": "https://github.com/propertybao-ha/propertybao-ha/issues",
   "requirements": [],
   "version": "1.0.0",
-  "iot_class": "cloud_polling"
+  "iot_class": "cloud_polling",
+  "loggers": ["custom_components.propertybao"]
 }

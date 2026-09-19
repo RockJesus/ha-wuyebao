@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "PropertyBao Login",
+        "description": "Enter your PropertyBao credentials",
+        "data": {
+          "username": "Phone Number",
+          "password": "Password",
+          "base_url": "Server URL (optional)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid username or password",
+      "cannot_connect": "Cannot connect to server",
+      "unknown": "Unknown error"
+    },
+    "abort": {
+      "already_configured": "This account is already configured"
+    }
+  }
+}

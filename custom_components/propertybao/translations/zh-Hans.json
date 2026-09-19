@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "物业宝登录",
+        "description": "输入物业宝账号密码",
+        "data": {
+          "username": "手机号",
+          "password": "密码",
+          "base_url": "服务器地址（可选）"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "用户名或密码错误",
+      "cannot_connect": "无法连接到服务器",
+      "unknown": "未知错误"
+    },
+    "abort": {
+      "already_configured": "该账号已配置"
+    }
+  }
+}
