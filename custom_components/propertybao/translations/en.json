@@ -6,8 +6,7 @@
         "description": "Enter your PropertyBao credentials",
         "data": {
           "username": "Phone Number",
-          "password": "Password",
-          "base_url": "Server URL (optional)"
+          "password": "Password"
         }
       }
     },

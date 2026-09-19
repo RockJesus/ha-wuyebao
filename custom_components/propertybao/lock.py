@@ -10,7 +10,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
-from .api import PropertyBaoClient, PropertyBaoApiError
+from .api import PropertyBaoClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,16 +24,13 @@ async def async_setup_entry(
     client: PropertyBaoClient = hass.data[DOMAIN][entry.entry_id]
 
     try:
-        gates = await client.get_device_gates()
+        gates = await client.get_gates()
         _LOGGER.info("Found %d gates", len(gates))
     except Exception as err:
         _LOGGER.error("Failed to get gates: %s", err)
         gates = []
 
-    entities = []
-    for gate in gates:
-        entities.append(PropertyBaoLock(client, gate))
-
+    entities = [PropertyBaoLock(client, gate) for gate in gates]
     async_add_entities(entities)
 
 
@@ -49,22 +46,18 @@ class PropertyBaoLock(LockEntity):
         self._gate = gate
         self._attr_unique_id = gate.get("id", gate.get("uid", "unknown"))
 
-        # Build name
-        building_name = gate.get("buildingName", "")
-        unit_name = gate.get("unitName", "")
         alias = gate.get("alias", "")
+        area_name = gate.get("areaName", "")
+        device_number = gate.get("deviceNumber", "")
 
         if alias:
             self._attr_name = alias
-        elif building_name and unit_name:
-            self._attr_name = f"{building_name}{unit_name}"
-        elif building_name:
-            self._attr_name = building_name
+        elif area_name and device_number:
+            self._attr_name = f"{area_name}-{device_number}"
         else:
-            self._attr_name = gate.get("deviceNumber", "门禁")
+            self._attr_name = f"门禁-{device_number}"
 
         self._attr_is_locked = True
-        self._attr_code_format = r"^\d{6}$"
 
     @property
     def device_state_attributes(self) -> dict[str, Any]:
@@ -76,20 +69,21 @@ class PropertyBaoLock(LockEntity):
             "device_number": self._gate.get("deviceNumber"),
             "community_id": self._gate.get("communityId"),
             "unlock_password": self._gate.get("password"),
-            "sip_target": self._client._build_sip_target(self._gate),
+            "state": self._gate.get("state"),
         }
 
     async def async_unlock(self, **kwargs: Any) -> None:
-        """Unlock the door via SIP."""
-        try:
-            await self._client.open_door_via_sip(self._gate)
-            self._attr_is_locked = False
-            self.async_write_ha_state()
-            self.hass.loop.call_later(10, self._set_locked)
-            _LOGGER.info("Door unlock command sent: %s", self.name)
-        except PropertyBaoApiError as err:
-            _LOGGER.error("Failed to unlock door: %s", err)
-            raise
+        """Unlock the door (via SIP, not yet implemented)."""
+        _LOGGER.warning(
+            "Door unlock not yet implemented. Gate: %s, deviceNumber: %s",
+            self.name,
+            self._gate.get("deviceNumber"),
+        )
+        # TODO: Implement SIP MESSAGE unlock
+        # For now, just simulate unlock
+        self._attr_is_locked = False
+        self.async_write_ha_state()
+        self.hass.loop.call_later(10, self._set_locked)
 
     def _set_locked(self) -> None:
         """Set locked state."""

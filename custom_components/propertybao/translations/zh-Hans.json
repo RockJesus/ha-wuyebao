@@ -6,8 +6,7 @@
         "description": "输入物业宝账号密码",
         "data": {
           "username": "手机号",
-          "password": "密码",
-          "base_url": "服务器地址（可选）"
+          "password": "密码"
         }
       }
     },

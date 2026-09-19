@@ -8,16 +8,9 @@ import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 
-from .const import (
-    CONF_PASSWORD,
-    CONF_USERNAME,
-    CONF_BASE_URL,
-    DEFAULT_BASE_URL,
-    DOMAIN,
-)
+from .const import CONF_PASSWORD, CONF_USERNAME, DOMAIN
 from .api import PropertyBaoClient, PropertyBaoAuthError
 
 _LOGGER = logging.getLogger(__name__)
@@ -26,30 +19,8 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_USERNAME): str,
         vol.Required(CONF_PASSWORD): str,
-        vol.Optional(CONF_BASE_URL, default=DEFAULT_BASE_URL): str,
     }
 )
-
-
-async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the user input allows us to connect."""
-    session = aiohttp.ClientSession()
-    client = PropertyBaoClient(
-        username=data[CONF_USERNAME],
-        password=data[CONF_PASSWORD],
-        base_url=data[CONF_BASE_URL],
-        session=session,
-    )
-
-    try:
-        result = await client.login()
-        return {
-            "title": f"物业宝 ({data[CONF_USERNAME]})",
-            "access_token": client.access_token,
-            "refresh_token": client.refresh_token,
-        }
-    finally:
-        await session.close()
 
 
 class PropertyBaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -64,19 +35,26 @@ class PropertyBaoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            session = aiohttp.ClientSession()
+            client = PropertyBaoClient(
+                username=user_input[CONF_USERNAME],
+                password=user_input[CONF_PASSWORD],
+                session=session,
+            )
+
             try:
-                info = await validate_input(self.hass, user_input)
+                await client.login()
+                title = f"物业宝 ({client.community_name or user_input[CONF_USERNAME]})"
+                await session.close()
+                return self.async_create_entry(title=title, data=user_input)
             except PropertyBaoAuthError as err:
-                _LOGGER.error("Authentication error: %s", err)
+                _LOGGER.error("Auth error: %s", err)
                 errors["base"] = "invalid_auth"
             except Exception as err:
-                _LOGGER.exception("Unexpected exception: %s", err)
+                _LOGGER.exception("Unexpected error: %s", err)
                 errors["base"] = "unknown"
-            else:
-                return self.async_create_entry(
-                    title=info["title"],
-                    data=user_input,
-                )
+            finally:
+                await session.close()
 
         return self.async_show_form(
             step_id="user",
