@@ -1,13 +1,17 @@
 {
   "domain": "wuyebao",
   "name": "物业宝（家和云联）",
-  "codeowners": ["@local"],
+  "codeowners": [
+    "@local"
+  ],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://github.com/local/wuyebao-jhcloud",
   "integration_type": "device",
   "iot_class": "cloud_polling",
-  "loggers": ["custom_components.wuyebao"],
+  "loggers": [
+    "custom_components.wuyebao"
+  ],
   "requirements": [],
-  "version": "2.6.5"
+  "version": "2.6.6"
 }

@@ -48,6 +48,7 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._refresh_token: str | None = None
         self.last_open: dict[str, Any] | None = None
         self._community_id: str | None = entry.data.get(CONF_COMMUNITY_ID)
+        self._last_call_number: str | None = None
         self._community_field: str = entry.options.get(
             CONF_COMMUNITY_FIELD, "communityId"
         )
@@ -163,10 +164,28 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         area_code = str(raw.get("areaCode") or "") or None
         community_code = str(raw.get("communityCode") or "") or None
         binding_code = str(raw.get("bindingCode") or "") or None
+        building_code = str(raw.get("buildingCode") or "") or None
+        unit_code = str(raw.get("unitCode") or "") or None
+        floor_code = str(raw.get("floorCode") or "") or None
+        gate_pwd = str(raw.get("password") or "") or None
+        # The intercom call records show the app's real callee identifier
+        # format: RM-<community>-<area>-<building>-<unit>-<floor>-<device>
+        # (e.g. RM-840-1-4-2-24-2) and MN-<community>-0-0-0-0-<device> for
+        # walls/vehicle gates. Build the same identifiers for this gate.
+        call_number: str | None = None
+        mn_number: str | None = None
+        if community_code and device_number:
+            segs = [community_code]
+            for part in (area_code, building_code, unit_code, floor_code):
+                segs.append(part if part is not None else "0")
+            call_number = f"RM-{'-'.join(segs)}-{device_number}"
+            mn_number = f"MN-{community_code}-0-0-0-0-{device_number}"
         # Prefer the account owner record for the SIP identity.
         owners = (self.data or {}).get(ATTR_OWNER)
         if isinstance(owners, dict):
             user_id = str(owners.get("userId") or user_id or "") or None
+            if not binding_code and owners.get("bindingCode"):
+                binding_code = str(owners.get("bindingCode")) or None
 
         phone = str(self.entry.data.get(CONF_PHONE) or "") or None
 
@@ -193,6 +212,16 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             identities.append(("phone+access", phone, token))
         if user_id and token:
             identities.append(("userId+access", user_id, token))
+        # The callNumber identifier as the SIP username, with the login
+        # password / access token / the gate's own password as candidates.
+        if call_number and login_pwd:
+            identities.append(("callNumber+pwd", call_number, login_pwd))
+        if call_number and token:
+            identities.append(("callNumber+access", call_number, token))
+        if call_number and gate_pwd:
+            identities.append(("callNumber+gate", call_number, gate_pwd))
+        if phone and gate_pwd:
+            identities.append(("phone+gate", phone, gate_pwd))
 
         targets: list[tuple[str, str]] = []
         if gate_uid:
@@ -200,6 +229,10 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         targets.append(("gate_id", gate_id))
         if device_number:
             targets.append(("deviceNumber", device_number))
+        if call_number:
+            targets.append(("callNumber", call_number))
+        if mn_number:
+            targets.append(("callNumber-MN", mn_number))
         if building_id:
             targets.append(("buildingId", building_id))
         if unit_id:
@@ -356,6 +389,21 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         _LOGGER.info("SIP 开门诊断结果: %s", json.dumps(log, ensure_ascii=False, default=str))
 
+    @staticmethod
+    def _derive_call_number(raw: dict | None) -> str | None:
+        """Build the app-style intercom identifier:
+        RM-<community>-<area>-<building>-<unit>-<floor>-<device>."""
+        raw = raw or {}
+        community_code = str(raw.get("communityCode") or "") or None
+        device_number = str(raw.get("deviceNumber") or "") or None
+        if not community_code or not device_number:
+            return None
+        segs = [community_code]
+        for key in ("areaCode", "buildingCode", "unitCode", "floorCode"):
+            part = str(raw.get(key) or "") or None
+            segs.append(part if part is not None else "0")
+        return f"RM-{'-'.join(segs)}-{device_number}"
+
     async def open_gate(self, gate_id: str) -> None:
         """Open a gate and record the result.
 
@@ -368,6 +416,12 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         raw = next((g.get("raw") for g in gates if g.get("gate_id") == gate_id), None)
         try:
             token = await self._ensure_token()
+            # Derive the app-style callNumber (RM-...) for the HTTP call-based
+            # diagnostics and the SIP diag.
+            try:
+                self._last_call_number = self._derive_call_number(raw)
+            except Exception:  # noqa: BLE001
+                self._last_call_number = None
             try:
                 await self.api.open_gate(token, gate_id)
             except Exception:
@@ -377,6 +431,7 @@ class WuyeBaoCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     gate_id,
                     raw,
                     community_id=self._community_id,
+                    call_number=self._last_call_number,
                 )
                 hits = [d for d in diag if d.get("ok")]
                 _LOGGER.info(

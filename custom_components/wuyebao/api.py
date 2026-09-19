@@ -307,6 +307,7 @@ class WuyeBaoAPI:
         gate_id: str,
         raw: dict[str, Any] | None,
         community_id: str | None = None,
+        call_number: str | None = None,
     ) -> list[dict[str, Any]]:
         """Try the most plausible HTTP open-door variants and report each result.
 
@@ -322,6 +323,7 @@ class WuyeBaoAPI:
         gate_pwd = str(raw.get("password") or "") or None
         area_id = str(raw.get("areaId") or "") or None
         community = community_id or str(raw.get("communityId") or "") or None
+        call_number = call_number or str(raw.get("callNumber") or "") or None
 
         candidates: list[tuple[str, str, dict, dict]] = []
         base = build_open_path(self._open_path, gate_id)
@@ -365,6 +367,16 @@ class WuyeBaoAPI:
             add("POST", f"api/device/grant/areas/{area_id}/gates/{gate_id}/unlock", q_with_pwd)
         # 6) GET variant of the configured path
         add("GET", base, q_with_pwd)
+        # 7) call-based HTTP candidates (the app logs calls via
+        #    api/call/.../grant/calls; the same path may accept a POST to
+        #    originate a call with the callNumber identifier)
+        if call_number:
+            add("POST", "api/call/grant/calls", q_common, {"callNumber": call_number})
+            add("POST", "api/call/grant/calls", {"callNumber": call_number})
+            add("POST", "api/call/1/1/grant/calls", q_common, {"callNumber": call_number})
+            add("POST", f"api/device/grant/gates/{gate_id}/call", q_with_pwd, {"callNumber": call_number})
+            add("POST", f"api/device/grant/gates/{gate_id}/callNumber", q_common, {"callNumber": call_number})
+            add("POST", f"api/device/grant/gates/{gate_id}/sip", q_common, {"callNumber": call_number})
 
         results: list[dict[str, Any]] = []
         for method, path, params, payload in candidates:
