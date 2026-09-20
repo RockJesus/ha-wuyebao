@@ -6,7 +6,7 @@
   "documentation": "https://github.com/propertybao-ha/propertybao-ha",
   "issue_tracker": "https://github.com/propertybao-ha/propertybao-ha/issues",
   "requirements": [],
-  "version": "1.1.0",
+  "version": "5.7.0",
   "iot_class": "cloud_polling",
   "loggers": ["custom_components.propertybao"]
 }

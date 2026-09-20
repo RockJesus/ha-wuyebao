@@ -167,8 +167,8 @@ class PropertyBaoSipClient:
                 # Wall gate: GT-{community}-{area}-0-0-0-{deviceNumber}
                 gt_uri = f"GT-{community_code}-{area_code}-0-0-0-{device_number}"
             else:
-                # Outdoor/unit door: OD-{community}-{building}-{unit}-0-0-0
-                gt_uri = f"OD-{community_code}-{building_code}-{unit_code}-0-0-0"
+                # Outdoor/unit door: OD-{community}-{area}-{building}-{unit}-{floor}-{deviceNumber}
+                gt_uri = f"OD-{community_code}-{area_code}-{building_code}-{unit_code}-{floor_code}-{device_number}"
 
             body = json.dumps(
                 {
