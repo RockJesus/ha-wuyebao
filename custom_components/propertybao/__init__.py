@@ -13,7 +13,7 @@ from .api import PropertyBaoClient
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.LOCK, Platform.SENSOR, Platform.BUTTON]
+PLATFORMS: list[Platform] = [Platform.LOCK, Platform.SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

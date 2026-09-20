@@ -31,11 +31,12 @@ async def async_setup_entry(
         _LOGGER.error("Failed to get gates: %s", err)
         gates = []
 
-    # Create monitor buttons for wall gates (they have cameras)
+    # Create monitor buttons for all gates (wall and outdoor)
     entities = []
     for gate in gates:
         gate_type = gate.get("type", "")
-        if gate_type == "wall":
+        # Wall gates and unit doors both have cameras
+        if gate_type in ("wall", "outdoor"):
             entities.append(PropertyBaoMonitorButton(client, entry.entry_id, gate))
 
     async_add_entities(entities)
