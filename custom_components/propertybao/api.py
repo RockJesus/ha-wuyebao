@@ -311,6 +311,55 @@ class PropertyBaoClient:
 
         return result
 
+    async def start_monitor(self, gate: dict[str, Any]) -> dict[str, Any]:
+        """Start monitoring by sending SIP MESSAGE."""
+        # Auto-refresh SIP token if expired
+        if not self.sip_jwt or self._sip_token_expires < time.time() + 300:
+            try:
+                await self.refresh_sip_token()
+            except Exception as err:
+                raise PropertyBaoApiError(f"Failed to refresh SIP token: {err}")
+
+        if not self.sip_jwt:
+            raise PropertyBaoApiError("SIP JWT not available")
+
+        community_code = str(gate.get("communityCode") or self.community_code or "0")
+        area_code = str(gate.get("areaCode") or "0")
+        building_code = str(gate.get("buildingCode") or "0")
+        unit_code = str(gate.get("unitCode") or "0")
+        floor_code = str(gate.get("floorCode") or "0")
+        device_number = str(gate.get("deviceNumber") or "")
+        device_type = str(gate.get("type") or "wall")
+
+        if not device_number or not self.owner_id:
+            raise PropertyBaoApiError(f"Missing required fields")
+
+        def _do_monitor() -> dict[str, Any]:
+            client = PropertyBaoSipClient(
+                user=self.username,
+                jwt=self.sip_jwt,
+                sid=self.sip_sid,
+            )
+            return client.monitor(
+                owner_id=self.owner_id,
+                device_type=device_type,
+                device_number=device_number,
+                community_code=community_code,
+                area_code=area_code,
+                building_code=building_code,
+                unit_code=unit_code,
+                floor_code=floor_code,
+            )
+
+        result = await asyncio.to_thread(_do_monitor)
+
+        if not result.get("ok"):
+            raise PropertyBaoApiError(
+                f"SIP monitor failed: status={result.get('status')} error={result.get('error', '')}"
+            )
+
+        return result
+
     async def async_close(self) -> None:
         """Close the session."""
         await self._session.close()

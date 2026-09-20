@@ -8,13 +8,14 @@ Home Assistant 自定义集成，用于连接物业宝 App，实现门禁控制�
 ## 功能特性
 
 - ✅ 用户名密码登录
-- ✅ Token 自动刷新（长期有效）
+- ✅ Token 自动刷新（长期有效，突破7天限制）
 - ✅ 门禁设备列表自动发现
 - ✅ 门锁实体（每个门禁一个实体）
+- ✅ SIP 开门（南门、北门、单元门均正常）
+- ✅ 监控按钮（触发监控呼叫）
 - ✅ 传感器：用户名、小区信息
-- 🚧 SIP 开门（开发中）
-- 🚧 监控视频（开发中）
-- 🚧 电梯呼叫（开发中）
+- 🚧 监控视频流（开发中）
+- ❌ 电梯呼叫（暂不支持）
 
 ## 安装
 
@@ -59,24 +60,36 @@ Home Assistant 自定义集成，用于连接物业宝 App，实现门禁控制�
 - **用户名** - 当前登录账号
 - **小区** - 所在小区名称
 
+### 按钮实体
+
+为每个围墙门（南门、北门）自动创建一个监控按钮：
+
+- **名称**：查看监控
+- **功能**：点击后发送 SIP 监控呼叫，触发门禁摄像头启动
+- **使用**：触发后可在手机 App 上查看实时监控视频
+
 ## API 说明
 
-本集成基于物业宝 App 逆向分析，主要接口：
+本集成基于物业宝 App 抓包分析，主要接口：
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
 | `/api/client/anon/token` | POST | 登录获取 Token |
-| `/api/client/anon/refresh_token` | POST | 刷新 Token |
+| `/api/client/anon/refresh_token` | GET | 刷新 Token |
+| `/api/client/anon/client_token` | GET | 获取 SIP Token |
 | `/api/device/grant/gates` | GET | 获取门禁列表 |
 | `/api/owner/anon/owners/community` | GET | 获取业主信息 |
 
 **开门机制**：开门通过 SIP MESSAGE 发送，目标地址为设备 SIP 账号，消息体为 JSON 格式的解锁指令。
 
+**监控机制**：监控通过 SIP MESSAGE 发送，类型为 `monitor`，触发门禁摄像头启动。
+
 ## 注意事项
 
 - 本集成仅供学习交流使用
 - 请遵守物业宝相关服务条款
-- 开门功能需要 SIP 协议支持，目前为预留接口
+- 开门功能已支持南门、北门、单元门
+- 监控按钮仅触发呼叫，视频需在手机 App 查看
 - 如有问题请提交 Issue
 
 ## 开发
@@ -98,7 +111,9 @@ propertybao-ha/
 │       ├── config_flow.py   # 配置流程
 │       ├── manifest.json    # 集成清单
 │       ├── lock.py          # 门锁平台
+│       ├── button.py        # 按钮平台
 │       ├── sensor.py        # 传感器平台
+│       ├── sip.py           # SIP 客户端
 │       └── translations/    # 翻译文件
 ├── .github/                 # GitHub 配置
 ├── README.md                # 说明文档

@@ -214,3 +214,74 @@ class PropertyBaoSipClient:
                 sock.close()
             except Exception:
                 pass
+
+    def monitor(
+        self,
+        owner_id: str,
+        device_type: str,
+        device_number: str,
+        community_code: str,
+        area_code: str = "0",
+        building_code: str = "0",
+        unit_code: str = "0",
+        floor_code: str = "0",
+    ) -> dict:
+        """Send SIP MESSAGE to start monitoring."""
+        reg = self.register()
+        if not reg.get("ok"):
+            return reg
+        sock = reg.get("_sock")
+        if sock is None:
+            return {"ok": False, "status": 0, "error": "no socket after REGISTER"}
+
+        try:
+            # Build SIP target based on device type
+            if device_type == "wall":
+                gt_uri = f"GT-{community_code}-{area_code}-0-0-0-{device_number}"
+            else:
+                gt_uri = f"OD-{community_code}-{area_code}-{building_code}-{unit_code}-{floor_code}-{device_number}"
+
+            body = json.dumps(
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "monitor",
+                    "content": {
+                        "device": device_type,
+                        "ownerId": str(owner_id),
+                        "deviceNumber": str(device_number),
+                    },
+                },
+                separators=(",", ":"),
+            )
+            branch = _gen_branch()
+            tag = _gen_tag()
+            call_id = uuid.uuid4().hex[:24]
+            lines = [
+                f"MESSAGE sip:{gt_uri}@{SIP_REALM} SIP/2.0",
+                f"Via: SIP/2.0/TCP {self._local_ip}:5060;rport;branch={branch};alias",
+                "Max-Forwards: 70",
+                f"From: <sip:{self.user}@{SIP_REALM}>;tag={tag}",
+                f"To: <sip:{gt_uri}@{SIP_REALM}>",
+                f"Call-ID: {call_id}",
+                "CSeq: 2 MESSAGE",
+                f"Route: {SIP_ROUTE}",
+                f"User-Agent: {SIP_UA}",
+                "Content-Type: text/plain",
+                f"Content-Length: {len(body)}",
+                "",
+                body,
+            ]
+            payload = "\r\n".join(lines)
+            code, reason, raw = self._send_and_recv(sock, payload)
+            return {
+                "ok": code == 200,
+                "status": code,
+                "reason": reason,
+                "raw": raw,
+                "gt_uri": gt_uri,
+            }
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
