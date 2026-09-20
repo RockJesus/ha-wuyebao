@@ -162,10 +162,14 @@ class PropertyBaoSipClient:
             return {"ok": False, "status": 0, "error": "no socket after REGISTER"}
 
         try:
-            gt_uri = (
-                f"GT-{community_code}-{area_code}-{building_code}-"
-                f"{unit_code}-{floor_code}-{device_number}"
-            )
+            # Build SIP target based on device type
+            if device_type == "wall":
+                # Wall gate: GT-{community}-{area}-0-0-0-{deviceNumber}
+                gt_uri = f"GT-{community_code}-{area_code}-0-0-0-{device_number}"
+            else:
+                # Outdoor/unit door: OD-{community}-{building}-{unit}-0-0-0
+                gt_uri = f"OD-{community_code}-{building_code}-{unit_code}-0-0-0"
+
             body = json.dumps(
                 {
                     "id": str(uuid.uuid4()),
