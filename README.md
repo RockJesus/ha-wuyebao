@@ -21,7 +21,7 @@ Home Assistant 自定义集成，用于连接物业宝 App，实现门禁控制�
 ### 方法一：HACS 安装（推荐）
 
 1. 确保已安装 [HACS](https://hacs.xyz/)
-2. 在 HACS 中搜索 "物业宝" 或 "propertybao"
+2. 在 HACS 中添加自定义仓库：https://github.com/RockJesus/ha-wuyebao ，类别选择「集成」在 HACS 中搜索 "物业宝" 或 "propertybao"
 3. 点击下载并重启 Home Assistant
 
 ### 方法二：手动安装
