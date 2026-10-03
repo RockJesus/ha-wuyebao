@@ -15,6 +15,8 @@ from .const import (
     API_CLIENT_TOKEN,
     API_OWNER_COMMUNITY,
     API_GATES,
+    API_OWNERS,
+    API_CALLS,
     DEFAULT_BASE_URL,
     DEFAULT_CLIENT_ID,
     DEFAULT_SIP_CLIENT_ID,
@@ -67,6 +69,9 @@ class PropertyBaoClient:
         self.community_id: str | None = None
         self.community_name: str | None = None
         self.community_code: int | None = None
+        self.binding_code: str | None = None
+        self.unit_id: str | None = None
+        self.owners: list[dict[str, Any]] = []
 
     @property
     def access_token(self) -> str | None:
@@ -188,6 +193,11 @@ class PropertyBaoClient:
             else:
                 raise PropertyBaoApiError(f"Failed to get SIP token: {data}")
 
+    async def ensure_sip_token(self) -> None:
+        """Refresh the SIP JWT if it is missing or close to expiry."""
+        if not self.sip_jwt or self._sip_token_expires < time.time() + 300:
+            await self.refresh_sip_token()
+
     async def refresh_access_token(self) -> None:
         """Refresh access token."""
         if not self._refresh_token:
@@ -251,16 +261,183 @@ class PropertyBaoClient:
         return []
 
     async def get_gates(self) -> list[dict[str, Any]]:
-        """Get gate list."""
+        """Get gate list.
+
+        The app filters by communityId + unitId + type=indoor.  Without
+        unitId the server returns every unit door in the whole community
+        (dozens of unrelated devices), so we always pass the owner's
+        unitId once known.
+        """
         params = {}
         if self.community_id:
             params["communityId"] = self.community_id
+        if self.unit_id:
+            params["unitId"] = self.unit_id
+            params["type"] = "indoor"
 
         data = await self._request("GET", API_GATES, token=self._access_token, params=params)
         raw = data.get("data", data)
         if isinstance(raw, list):
             return raw
         return []
+
+    async def get_owners(self) -> list[dict[str, Any]]:
+        """Get owner info (contains bindingCode for camera calls)."""
+        params = {}
+        if self.community_id:
+            params["communityId"] = self.community_id
+
+        data = await self._request("GET", API_OWNERS, token=self._access_token, params=params)
+        raw = data.get("data", data)
+        if isinstance(raw, list):
+            self.owners = raw
+            # Save bindingCode (indoor unit SIP number) and unitId
+            # (for the gates API - the app filters with unitId + type=indoor)
+            for owner in raw:
+                binding = owner.get("bindingCode")
+                if binding:
+                    self.binding_code = str(binding)
+                unit = owner.get("unitId")
+                if unit:
+                    self.unit_id = str(unit)
+                if self.binding_code and self.unit_id:
+                    break
+            if self.binding_code:
+                _LOGGER.info("Binding code: %s", self.binding_code)
+            if self.unit_id:
+                _LOGGER.info("Unit id: %s", self.unit_id)
+            return raw
+        return []
+
+    async def get_calls(
+        self, page: int = 1, page_size: int = 20
+    ) -> list[dict[str, Any]]:
+        """Get call records (contain door camera snapshot images)."""
+        params: dict[str, Any] = {}
+        if self.community_id:
+            params["communityId"] = self.community_id
+        if self.binding_code:
+            params["callNumber"] = self.binding_code
+
+        path = API_CALLS.format(page=page, page_size=page_size)
+        data = await self._request("GET", path, token=self._access_token, params=params)
+        raw = data.get("data", data)
+        if isinstance(raw, list):
+            return raw
+        return []
+
+    async def get_latest_call_image(self, gate: dict[str, Any]) -> str | None:
+        """Get the latest call-record snapshot URL matching a gate device.
+
+        Strict matching by deviceNumber + devicesType. No fallback to other
+        devices' records (avoids showing wrong door images).
+        """
+        try:
+            calls = await self.get_calls(page=1, page_size=20)
+        except Exception as err:
+            _LOGGER.warning("Failed to get call records: %s", err)
+            return None
+
+        if not calls:
+            return None
+
+        device_number = str(gate.get("deviceNumber", ""))
+        gate_type = str(gate.get("type", ""))
+
+        for call in calls:
+            call_dev = str(call.get("deviceNumber", ""))
+            call_type = str(call.get("devicesType", ""))
+            if call_dev == device_number and call_type == gate_type:
+                url = call.get("imageUrl")
+                if url:
+                    return str(url)
+
+        return None
+
+    async def get_alarms(
+        self, page: int = 1, page_size: int = 20
+    ) -> list[dict[str, Any]]:
+        """Get alarm records (may contain door camera snapshots)."""
+        params: dict[str, Any] = {}
+        if self.community_id:
+            params["communityId"] = self.community_id
+        params["pageNo"] = page
+        params["pageSize"] = page_size
+
+        try:
+            data = await self._request(
+                "GET", API_ALARMS, token=self._access_token, params=params
+            )
+        except Exception as err:
+            _LOGGER.debug("Alarm records unavailable: %s", err)
+            return []
+        raw = data.get("data", data)
+        if isinstance(raw, list):
+            return raw
+        # Some APIs wrap the list in {"list": [...]}
+        if isinstance(raw, dict):
+            for key in ("list", "records", "items"):
+                val = raw.get(key)
+                if isinstance(val, list):
+                    return val
+        return []
+
+    async def get_gate_snapshot(self, gate: dict[str, Any]) -> str | None:
+        """Get the latest snapshot URL for a gate from calls, then alarms."""
+        # 1) Call records (unit doors normally appear here)
+        url = await self.get_latest_call_image(gate)
+        if url:
+            return url
+
+        # 2) Alarm records (may cover wall gates / other devices)
+        device_number = str(gate.get("deviceNumber", ""))
+        gate_type = str(gate.get("type", ""))
+        try:
+            alarms = await self.get_alarms(page=1, page_size=20)
+        except Exception as err:
+            _LOGGER.warning("Failed to get alarms: %s", err)
+            alarms = []
+
+        for alarm in alarms:
+            alarm_dev = str(alarm.get("deviceNumber") or alarm.get("deviceNo") or "")
+            alarm_type = str(alarm.get("devicesType") or alarm.get("deviceType") or "")
+            image = alarm.get("imageUrl") or alarm.get("image") or alarm.get("url")
+            if image and (
+                (alarm_dev and alarm_dev == device_number and alarm_type == gate_type)
+                or (alarm_dev == device_number)
+            ):
+                return str(image)
+
+        return None
+
+    async def trigger_snapshot(self, gate: dict[str, Any]) -> bool:
+        """Trigger a snapshot by sending a SIP monitor message (best-effort)."""
+        try:
+            result = await self.start_monitor(gate)
+            if result.get("ok"):
+                _LOGGER.info("Snapshot trigger sent for %s", gate.get("deviceNumber"))
+                return True
+            _LOGGER.warning(
+                "Snapshot trigger failed for %s: status=%s",
+                gate.get("deviceNumber"),
+                result.get("status"),
+            )
+        except Exception as err:
+            _LOGGER.warning("Snapshot trigger error: %s", err)
+        return False
+
+    async def download_image(self, url: str) -> bytes | None:
+        """Download image bytes from a URL."""
+        try:
+            async with self._session.get(
+                url, ssl=False, timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+                _LOGGER.warning("Image download failed: HTTP %s", resp.status)
+        except Exception as err:
+            _LOGGER.warning("Failed to download image %s: %s", url, err)
+        return None
 
     async def open_door_sip(self, gate: dict[str, Any]) -> dict[str, Any]:
         """Open door via SIP MESSAGE."""
