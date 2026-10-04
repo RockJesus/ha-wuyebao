@@ -270,9 +270,9 @@ class SipMonitorCall:
             f"INVITE sip:{self.gt_uri}@{SIP_REALM};transport=tcp SIP/2.0",
             f"Via: SIP/2.0/TCP {self._local_ip}:5060;rport;branch={branch};alias",
             "Max-Forwards: 70",
-            # official app uses a bare From URI (no angle brackets) in INVITE
+            # official app uses bare From/To URIs (no angle brackets) in INVITE
             f"From: sip:{self.user}@{SIP_REALM};tag={tag}",
-            f"To: <sip:{self.gt_uri}@{SIP_REALM}>",
+            f"To: sip:{self.gt_uri}@{SIP_REALM}",
             f"Contact: {contact}",
             f"Call-ID: {call_id}",
             "CSeq: 2 INVITE",
@@ -475,9 +475,10 @@ class SipMonitorCall:
                 except OSError:
                     break
                 if data is None:
-                    # periodic hole punch until media flows
+                    # periodic hole punch until media flows (0.5s interval so
+                    # slow devices / media nodes get the NAT mapping quickly)
                     now = time.time()
-                    if not received_rtp and now - last_punch > 1.0:
+                    if not received_rtp and now - last_punch > 0.5:
                         self._hole_punch()
                         last_punch = now
                     continue
@@ -651,6 +652,11 @@ class SipMonitorCall:
 
         code, reason, raw = self._invite()
         if code not in (100, 180, 183):
+            # log the full reply for 486/4xx diagnostics (Retry-After etc.)
+            _LOGGER.warning(
+                "INVITE %s not accepted: code=%s reason=%s reply=%s",
+                self.gt_uri, code, reason, raw[:400],
+            )
             self._cleanup_after_fail()
             return {"ok": False, "status": code, "error": f"INVITE {reason}"}
 
@@ -664,7 +670,7 @@ class SipMonitorCall:
         # return "486 Busy Here" for the next INVITE.
         sdp = raw.partition("\r\n\r\n")[2]
         final_code = code
-        deadline = time.time() + 15.0
+        deadline = time.time() + 25.0
         while time.time() < deadline:
             try:
                 extra = _recv_full(self._sock, min(2.0, deadline - time.time()))
