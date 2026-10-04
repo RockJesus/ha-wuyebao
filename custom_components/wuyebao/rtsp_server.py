@@ -69,7 +69,7 @@ class VideoSessionManager:
             if not getattr(client, "sip_jwt", None) or not getattr(client, "owner_id", None):
                 return None
 
-            for attempt in range(3):
+            for attempt in range(5):
                 # Packet capture of the official app (v1.1.1.53, 2026-10-04)
                 # proves the monitor flow is a plain INVITE: the app does
                 # NOT send a "monitor" SIP MESSAGE before the call (its
@@ -77,7 +77,9 @@ class VideoSessionManager:
                 # activation MESSAGE added in 6.6.3 was based on a wrong
                 # assumption and did not fix the "486 Busy Here" replies.
                 # Keep the INVITE-only flow; retries use a growing backoff
-                # so a gate can release its busy state before retrying.
+                # (10/20/30/45s) so a gate can release its busy state
+                # (the app keeps a monitor session ~30s after BYE) before
+                # retrying.  5 attempts cover the typical release window.
                 call = SipMonitorCall(
                     user=client.username,
                     jwt=client.sip_jwt,
@@ -86,7 +88,7 @@ class VideoSessionManager:
                     display_name=display_name,
                 )
                 _LOGGER.info(
-                    "Starting monitor call for %s (%s) attempt %d/3",
+                    "Starting monitor call for %s (%s) attempt %d/5",
                     gate_id, gt_uri, attempt + 1,
                 )
                 result = await asyncio.to_thread(call.start)
@@ -94,16 +96,18 @@ class VideoSessionManager:
                     _LOGGER.error(
                         "Monitor call start failed for %s: %s", gate_id, result
                     )
-                    if attempt < 2:
+                    if attempt < 4:
                         # 486 Busy Here / 100 Trying w/o final response: the
                         # gate may still be clearing the previous session.
-                        # Back off longer than the old 4s so the device can
-                        # release the busy state.
-                        await asyncio.sleep(6 + attempt * 6)
+                        # Back off longer than the app's session hold time so
+                        # the device can release the busy state.
+                        await asyncio.sleep(10 + attempt * 10 if attempt < 3 else 15 + (attempt - 2) * 15)
                         continue
                     return None
-                # wait for actual video RTP (SPS/PPS); retry on failure
-                got_video = await asyncio.to_thread(call.wait_for_video, 10.0)
+                # wait for actual video RTP (SPS/PPS); retry on failure.
+                # North gate / some devices take >10s to stream media after
+                # the 200 OK, so wait longer than the old 10s.
+                got_video = await asyncio.to_thread(call.wait_for_video, 20.0)
                 if got_video:
                     self._sessions[gate_id] = call
                     return call
@@ -111,8 +115,8 @@ class VideoSessionManager:
                     "No video media for %s, tearing down and retrying", gate_id
                 )
                 await asyncio.to_thread(call.stop)
-                if attempt < 2:
-                    await asyncio.sleep(6 + attempt * 6)
+                if attempt < 4:
+                    await asyncio.sleep(10 + attempt * 10 if attempt < 3 else 15 + (attempt - 2) * 15)
             return None
 
     def add_subscriber(self, gate_id: str, s: socket.socket, target: tuple) -> bool:
