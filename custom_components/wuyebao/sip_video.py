@@ -215,6 +215,8 @@ class SipMonitorCall:
             f"User-Agent: {SIP_UA}",
             f"Contact: {contact}",
             "Expires: 300",
+            # official app advertises this Allow list in REGISTER
+            "Allow: PRACK, INVITE, ACK, BYE, CANCEL, UPDATE, INFO, SUBSCRIBE, NOTIFY, REFER, MESSAGE, OPTIONS",
             "Content-Length: 0",
             "",
             "",
@@ -268,7 +270,8 @@ class SipMonitorCall:
             f"INVITE sip:{self.gt_uri}@{SIP_REALM};transport=tcp SIP/2.0",
             f"Via: SIP/2.0/TCP {self._local_ip}:5060;rport;branch={branch};alias",
             "Max-Forwards: 70",
-            f"From: <sip:{self.user}@{SIP_REALM}>;tag={tag}",
+            # official app uses a bare From URI (no angle brackets) in INVITE
+            f"From: sip:{self.user}@{SIP_REALM};tag={tag}",
             f"To: <sip:{self.gt_uri}@{SIP_REALM}>",
             f"Contact: {contact}",
             f"Call-ID: {call_id}",
