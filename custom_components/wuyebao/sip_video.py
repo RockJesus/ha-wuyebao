@@ -937,11 +937,11 @@ class SipMonitorCall:
                     self._remote_contact = line[2:].strip()
             if up.startswith("INFO "):
                 self._reply_200_to_info(msg)
-                # The app ACKs immediately after answering the device INFO;
-                # the device starts streaming only once it sees the ACK.
-                if not self._acked:
-                    self._acked = True
-                    self._ack()
+                # Do NOT ACK yet: the app ACKs only after the final
+                # 200 OK (INVITE) arrives.  An ACK for a provisional
+                # 183 is ignored by FreeSWITCH, and if we mark acked
+                # early we never send the real ACK -> media never
+                # activates.  The 200 OK branch below sends the ACK.
             elif up.startswith("SIP/2.0 ") and " 200 " in up[:64]:
                 new_body = msg.partition("\r\n\r\n")[2]
                 if "m=video" in new_body:
