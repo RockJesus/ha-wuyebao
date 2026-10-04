@@ -46,6 +46,51 @@ def _gen_tag() -> str:
     return uuid.uuid4().hex[:16]
 
 
+def _extract_record_routes(msg: str) -> list[str] | None:
+    """Return the Record-Route headers (as Route: header values) if present."""
+    routes: list[str] | None = None
+    for line in msg.split("\r\n"):
+        if line.lower().startswith("record-route:"):
+            val = line.split(":", 1)[1].strip()
+            # a single header may carry several comma-separated route entries
+            entries = [e.strip() for e in val.split(",") if e.strip()]
+            if entries:
+                routes = entries
+    return routes
+
+
+def _split_sip_messages(raw: str) -> list[str]:
+    """Split a raw TCP buffer into complete SIP messages.
+
+    The server often coalesces several responses into one TCP segment
+    (e.g. 183 + the device's INFO picture_fast_update).  _recv_full returns
+    the whole segment, so we must split it and process each message - the
+    INFO must be answered or the device never starts the media stream.
+    """
+    msgs: list[str] = []
+    rest = raw
+    while rest.strip():
+        head, sep, body = rest.partition("\r\n\r\n")
+        if not sep:
+            msgs.append(rest)
+            break
+        cl = 0
+        for line in head.split("\r\n"):
+            ln = line.lower()
+            if ln.startswith("content-length:") or ln.startswith("l:"):
+                try:
+                    cl = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    cl = 0
+        total = len(head) + 4 + cl
+        if len(rest) < total:
+            msgs.append(rest)
+            break
+        msgs.append(rest[:total])
+        rest = rest[total:]
+    return msgs
+
+
 def _recv_full(sock: socket.socket, timeout: float, max_len: int = 65535) -> str:
     """Read one complete SIP message (headers + content-length body)."""
     sock.settimeout(timeout)
@@ -60,7 +105,8 @@ def _recv_full(sock: socket.socket, timeout: float, max_len: int = 65535) -> str
     head, _, body = buf.partition(b"\r\n\r\n")
     content_length = 0
     for line in head.split(b"\r\n"):
-        if line.lower().startswith(b"content-length:"):
+        ln = line.lower()
+        if ln.startswith(b"content-length:") or ln.startswith(b"l:"):
             try:
                 content_length = int(line.split(b":", 1)[1].strip())
             except ValueError:
@@ -170,6 +216,11 @@ class SipMonitorCall:
         self.call_id: str | None = None
         self._from_tag: str | None = None
         self._remote_tag: str | None = None
+        self._remote_contact: str | None = None
+        self._pending_msg: str | None = None
+        self._acked = False
+        self._seq = 0
+        self._record_routes: list[str] | None = None
 
         # H264 parameter sets captured from RTP (for RTSP SDP)
         self.sps: bytes | None = None
@@ -319,24 +370,81 @@ class SipMonitorCall:
             reason = parts[1].strip() if len(parts) > 1 else ""
         return code, reason, reply
 
+    def _reply_200_to_info(self, info_request: str) -> None:
+        """Answer the device's in-dialog INFO (picture_fast_update).
+
+        Packet capture shows the device asks for a fast video update right
+        after 183 (early media) by sending an INFO (media_control XML); the
+        official app answers it with a 200 OK.  If we leave it unanswered the
+        device waits for the reply and never starts the RTP stream.
+        """
+        if self._sock is None:
+            return
+        head = info_request.split("\r\n\r\n", 1)[0]
+        lines = head.split("\r\n")
+        def get(hdr: str) -> str | None:
+            for ln in lines:
+                if ln.lower().startswith(hdr.lower() + ":"):
+                    return ln.split(":", 1)[1].strip()
+                if ln.lower().startswith(hdr.lower() + " "):  # compact form "i:..."
+                    return ln[2:].strip()
+            return None
+        via = get("Via") or get("v")
+        frm = get("From") or get("f")
+        to = get("To") or get("t")
+        call_id = get("Call-ID") or get("i")
+        cseq = get("CSeq") or get("CSeq")
+        if not (via and frm and to and call_id and cseq):
+            _LOGGER.debug("INFO reply skipped: missing headers in %s", head[:200])
+            return
+        branch = _gen_branch()
+        reply = "\r\n".join([
+            "SIP/2.0 200 OK",
+            f"Via: {via}",
+            f"From: {to};tag={self._from_tag or _gen_tag()}",
+            f"To: {frm}",
+            f"Call-ID: {call_id}",
+            f"CSeq: {cseq}",
+            f"User-Agent: {SIP_UA}",
+            "Content-Length: 0",
+            "",
+            "",
+        ])
+        try:
+            self._sock.sendall(reply.encode("utf-8"))
+            _LOGGER.info("Replied 200 OK to device INFO (%s)", self.gt_uri)
+        except OSError:
+            pass
+
     def _ack(self) -> None:
         if self._sock is None:
             return
         branch = _gen_branch()
+        # The app ACKs the device contact from the response (m: header), not
+        # the logical gt_uri@realm address, and routes via the Record-Route
+        # headers from the response.
+        target = self._remote_contact or f"sip:{self.gt_uri}@{SIP_REALM}"
         lines = [
-            f"ACK sip:{self.gt_uri}@{SIP_REALM} SIP/2.0",
+            f"ACK {target} SIP/2.0",
             f"Via: SIP/2.0/TCP {self._local_ip}:5060;rport;branch={branch};alias",
             "Max-Forwards: 70",
             f"From: <sip:{self.user}@{SIP_REALM}>;tag={self._from_tag or _gen_tag()}",
             f"To: <sip:{self.gt_uri}@{SIP_REALM}>;tag={self._remote_tag or ''}",
             f"Call-ID: {self.call_id or ''}",
             "CSeq: 2 ACK",
-            f"Route: {SIP_ROUTE}",
+        ]
+        if self._record_routes:
+            for rr in self._record_routes:
+                lines.append(f"Route: {rr}")
+        else:
+            lines.append(f"Route: {SIP_ROUTE}")
+        lines.extend([
+            "Supported: timer, path, replaces",
             f"User-Agent: {SIP_UA}",
             "Content-Length: 0",
             "",
             "",
-        ]
+        ])
         try:
             self._sock.sendall(("\r\n".join(lines)).encode("utf-8"))
         except OSError:
@@ -423,10 +531,23 @@ class SipMonitorCall:
             return
         if self._rtp_sock is None:
             return
-        probe = b"probing data"
+        # Send a legal RTP packet (PT 97 H264 with a filler NAL) instead of
+        # a bare ASCII probe: FreeSWITCH's media node only learns the NAT
+        # mapping from incoming packets it recognises as RTP/RTCP.  The app
+        # (PJSIP) sends real media packets for the same purpose.
         if self._ssrc is None:
             self._ssrc = uuid.uuid4().int & 0xFFFFFFFF
-        rr = struct.pack(">BBHI", 0x80, 0xC9, 1, self._ssrc)
+        self._seq = (self._seq or 0) + 1
+        rtp = struct.pack(
+            ">BBHII", 0x80, 97, self._seq & 0xFFFF, self._ssrc, int(time.time() * 1000) & 0xFFFFFFFF
+        )
+        pkt = rtp + b"\x00\x00\x00\x01\x09"  # H264 filler NAL
+        # legal RTCP Sender Report (32 bytes)
+        sr = (
+            struct.pack(">BBHII", 0x80, 0xC8, 6, self._ssrc, int(time.time() * 1000) & 0xFFFFFFFF)
+            + struct.pack(">II", 0, 0)
+            + struct.pack(">II", 0, 0)
+        )
         targets: list[tuple[str, int]] = [
             (self.media_ip, self.media_video_port),
             (
@@ -446,10 +567,12 @@ class SipMonitorCall:
                     else self.media_audio_port + 1,
                 )
             )
-        for target in targets:
+        for i, target in enumerate(targets):
             try:
-                self._rtp_sock.sendto(probe, target)
-                self._rtp_sock.sendto(rr, target)
+                if i % 2 == 0:
+                    self._rtp_sock.sendto(pkt, target)
+                else:
+                    self._rtp_sock.sendto(sr, target)
             except OSError:
                 pass
 
@@ -493,6 +616,8 @@ class SipMonitorCall:
                     _LOGGER.debug("Non-video RTP from %s: pt=%d len=%d", addr, pt, len(data))
                     continue
                 received_rtp = True
+                self._video_received = True
+                self._video_packet_count = getattr(self, "_video_packet_count", 0) + 1
                 # Track the stream's SSRC/timestamp/sequence so injected
                 # parameter-set packets look like part of the media stream.
                 self._stream_ssrc = int.from_bytes(data[8:12], "big")
@@ -627,10 +752,47 @@ class SipMonitorCall:
     # lifecycle
     # ------------------------------------------------------------------
     def start(self) -> dict:
-        """REGISTER -> INVITE -> hole punch -> start RTP receiver."""
+        """REGISTER once, then INVITE with retries until video RTP flows.
+
+        Packet capture shows the official app retries the monitor call for a
+        busy / non-answering gate (typically 4-5 INVITEs) until the device
+        finally answers and streams; the last attempt is the one that shows
+        video ("最后一次才有画面").  We mirror that behaviour: each attempt
+        that fails (busy 486, timeout, answered-but-no-media) is retried.
+        """
         if not self._register():
             return {"ok": False, "status": 0, "error": "REGISTER failed"}
+        self._running.set()
 
+        max_attempts = getattr(self, "max_monitor_attempts", 6)
+        retry_delay = getattr(self, "monitor_retry_delay", 2.0)
+        last = {"ok": False, "status": 0, "error": "INVITE failed"}
+        for attempt in range(1, max_attempts + 1):
+            if not self._running.is_set():
+                break
+            if attempt > 1:
+                _LOGGER.info(
+                    "Monitor %s retry %d/%d (delay %.1fs)",
+                    self.gt_uri, attempt, max_attempts, retry_delay,
+                )
+                time.sleep(retry_delay)
+                self._reset_session()
+                if not self._register():
+                    last = {"ok": False, "status": 0, "error": "REGISTER failed"}
+                    continue
+            last = self._start_attempt()
+            if last.get("ok"):
+                return last
+            _LOGGER.warning(
+                "Monitor %s attempt %d/%d failed: %s",
+                self.gt_uri, attempt, max_attempts, last.get("error"),
+            )
+        return last
+
+    def _start_attempt(self) -> dict:
+        """Single INVITE attempt: INVITE -> ACK -> hole punch -> RTP receiver."""
+        self._video_received = False
+        self._video_packet_count = 0
         # bind RTP sockets BEFORE INVITE so the offer ports are listening.
         # Retry with a fresh random port if the chosen one is taken.
         for _attempt in range(5):
@@ -660,46 +822,105 @@ class SipMonitorCall:
             self._cleanup_after_fail()
             return {"ok": False, "status": code, "error": f"INVITE {reason}"}
 
-        # wait for the final response (200 OK) - 183/100 are provisional.
-        # IMPORTANT: a receive timeout means "no data yet", NOT "final
-        # response arrived" - keep waiting until the deadline.  South wall
-        # gate answers 183 quickly, but north gate / unit doors take much
-        # longer to set up the media session (device wake-up).  Treating a
-        # short silence after "100 Trying" as failure caused us to give up
-        # early and then hammer the device with retries, which made it
-        # return "486 Busy Here" for the next INVITE.
+        # Wait for a response that carries the answer SDP (183 early-media or
+        # 200 OK) and ACK it, mirroring the official app.
+        #
+        # IMPORTANT (from packet capture + local repro): gates that answer
+        # with 183 "Session Progress" (early media) MUST be ACKed right away
+        # using the 183 SDP.  The device starts sending video after the ACK;
+        # if we keep waiting for the final 200 OK before ACKing, the device /
+        # FreeSWITCH media session gives up and no RTP ever arrives (observed
+        # for north wall gate GT-b and unit doors, while gates that answer a
+        # plain 200 OK work).  The app ACKs immediately on 183 and also
+        # answers the device's INFO "picture_fast_update" with 200 OK.
         sdp = raw.partition("\r\n\r\n")[2]
         final_code = code
+        acked = False
         deadline = time.time() + 25.0
         while time.time() < deadline:
             try:
                 extra = _recv_full(self._sock, min(2.0, deadline - time.time()))
             except socket.timeout:
-                continue  # no data yet, keep waiting for the final response
+                # no data yet: if we already ACKed early media, we are done
+                # waiting for a final response; otherwise keep waiting
+                if acked:
+                    break
+                continue
             except OSError:
                 break
             if not extra:
                 break  # connection closed
-            up = extra.upper()
-            if up.startswith("SIP/2.0 "):
-                try:
-                    final_code = int(extra.split(" ")[1])
-                except (ValueError, IndexError):
-                    pass
-                if final_code >= 200:
-                    sdp = extra.partition("\r\n\r\n")[2]
-                    break
-            # extract remote tag from any response
-            for line in extra.split("\r\n"):
-                if line.lower().startswith("t:") and ";tag=" in line:
-                    self._remote_tag = line.split(";tag=")[1].strip().rstrip("\r")
-                    break
+            # A segment may hold several SIP messages (e.g. 183 + the
+            # device's INFO).  Split and handle each one.
+            for msg in _split_sip_messages(extra):
+                up = msg.upper()
+                if up.startswith("SIP/2.0 "):
+                    try:
+                        final_code = int(msg.split(" ")[1])
+                    except (ValueError, IndexError):
+                        pass
+                    if self._record_routes is None:
+                        self._record_routes = _extract_record_routes(msg)
+                    if final_code >= 200 and not acked:
+                        body = msg.partition("\r\n\r\n")[2]
+                        if "m=video" in body or "m=audio" in body:
+                            sdp = body
+                            # 200 OK answered: any early-media packets seen
+                            # before this point were ringtone - restart the
+                            # real-video confirmation counter.
+                            self._video_packet_count = 0
+                            for line in msg.split("\r\n"):
+                                if line.lower().startswith("t:") and ";tag=" in line:
+                                    self._remote_tag = line.split(";tag=")[1].strip().rstrip("\r")
+                                elif line.lower().startswith("m:"):
+                                    self._remote_contact = line[2:].strip()
+                            self._pending_msg = extra  # keep INFO that followed
+                            break
+                        if sdp:
+                            # 183 already supplied the answer SDP; the final
+                            # 200 OK without a body is normal - ACK it.
+                            for line in msg.split("\r\n"):
+                                if line.lower().startswith("t:") and ";tag=" in line:
+                                    self._remote_tag = line.split(";tag=")[1].strip().rstrip("\r")
+                                elif line.lower().startswith("m:"):
+                                    self._remote_contact = line[2:].strip()
+                            self._pending_msg = extra
+                            break
+                        # no SDP anywhere yet - keep waiting (FreeSWITCH
+                        # occasionally answers 183/200 without SDP)
+                        continue
+                    # 183/180: take the SDP and ACK early media right away
+                    if final_code in (180, 183) and not acked:
+                        body = msg.partition("\r\n\r\n")[2]
+                        if "m=video" in body or "m=audio" in body:
+                            sdp = body
+                            for line in msg.split("\r\n"):
+                                if line.lower().startswith("t:") and ";tag=" in line:
+                                    self._remote_tag = line.split(";tag=")[1].strip().rstrip("\r")
+                                elif line.lower().startswith("m:"):
+                                    self._remote_contact = line[2:].strip()
+                            self._pending_msg = extra  # keep INFO that followed
+                            break
+                elif up.startswith("INFO "):
+                    # device INFO (picture_fast_update): answer 200 OK so the
+                    # device proceeds to stream media (the app does the same)
+                    self._reply_200_to_info(msg)
+                # extract remote tag + Contact (m:) from any response
+                for line in msg.split("\r\n"):
+                    if line.lower().startswith("t:") and ";tag=" in line:
+                        self._remote_tag = line.split(";tag=")[1].strip().rstrip("\r")
+                    elif line.lower().startswith("m:"):
+                        self._remote_contact = line[2:].strip()
+            else:
+                continue
+            break  # got the answer SDP
 
-        if final_code not in (183, 200):
+        if not acked and final_code not in (183, 200):
             self._cleanup_after_fail()
             return {"ok": False, "status": final_code, "error": f"INVITE {final_code}"}
 
         # parse answer SDP
+        _LOGGER.info("Monitor answer SDP for %s (len=%d): %.300s", self.gt_uri, len(sdp), sdp)
         info = _parse_sdp_answer(sdp)
         self.media_ip = info.get("media_ip")
         self.media_video_port = info.get("video_port")
@@ -719,11 +940,132 @@ class SipMonitorCall:
         self._rtp_thread = threading.Thread(target=self._rtp_loop, daemon=True, name="pb-rtp")
         self._rtp_thread.start()
 
+        # For 183 early media, the device sends INFO (picture_fast_update)
+        # right after 183 and waits for the 200 OK before it starts
+        # streaming.  The official app answers that INFO BEFORE sending the
+        # ACK.  Drain up to 3s answering INFO; if a final 200 OK arrives
+        # first, refresh the answer SDP.
+        def _drain_and_answer(duration: float) -> None:
+            # First process the tail of the segment that carried the answer
+            # SDP (the device INFO that arrived in the same TCP segment).
+            pending = getattr(self, "_pending_msg", None)
+            if pending:
+                msgs = _split_sip_messages(pending)
+                for idx, m in enumerate(msgs):
+                    if idx == 0:
+                        continue  # the 183/200 answer already handled
+                    _handle_tail(m)
+                self._pending_msg = None
+            deadline = time.time() + duration
+            while time.time() < deadline:
+                try:
+                    extra = _recv_full(self._sock, 0.5)
+                except (socket.timeout, OSError):
+                    return
+                if not extra:
+                    return
+                for m in _split_sip_messages(extra):
+                    _handle_tail(m)
+
+        def _handle_tail(msg: str) -> None:
+            up = msg.upper()
+            if self._record_routes is None:
+                self._record_routes = _extract_record_routes(msg)
+            # extract the device contact and To-tag BEFORE answering INFO /
+            # sending the ACK so the ACK targets the device, like the app
+            for line in msg.split("\r\n"):
+                if line.lower().startswith("t:") and ";tag=" in line:
+                    self._remote_tag = line.split(";tag=")[1].strip().rstrip("\r")
+                elif line.lower().startswith("m:"):
+                    self._remote_contact = line[2:].strip()
+            if up.startswith("INFO "):
+                self._reply_200_to_info(msg)
+                # Do NOT ACK yet: the app ACKs only after the final
+                # 200 OK (INVITE) arrives.  An ACK for a provisional
+                # 183 is ignored by FreeSWITCH, and if we mark acked
+                # early we never send the real ACK -> media never
+                # activates.  The 200 OK branch below sends the ACK.
+            elif up.startswith("SIP/2.0 ") and " 200 " in up[:64]:
+                new_body = msg.partition("\r\n\r\n")[2]
+                if "m=video" in new_body:
+                    # final 200 OK: restart the real-video counter (any
+                    # early-media packets were ringtone, not the device stream)
+                    self._video_packet_count = 0
+                    new_info = _parse_sdp_answer(new_body)
+                    if (
+                        new_info.get("media_ip")
+                        and new_info.get("video_port")
+                        and (
+                            new_info["media_ip"] != self.media_ip
+                            or new_info["video_port"] != self.media_video_port
+                        )
+                    ):
+                        _LOGGER.info(
+                            "Answer SDP updated: %s:%s -> %s:%s",
+                            self.media_ip, self.media_video_port,
+                            new_info["media_ip"], new_info["video_port"],
+                        )
+                        self.media_ip = new_info["media_ip"]
+                        self.media_video_port = new_info["video_port"]
+                        self.media_audio_port = new_info.get("audio_port")
+                        self.media_video_rtcp = new_info.get("video_rtcp")
+                        self.media_audio_rtcp = new_info.get("audio_rtcp")
+                        self._hole_punch()
+                if not self._acked:
+                    self._acked = True
+                    self._ack()
+
+        if final_code in (180, 183):
+            _drain_and_answer(3.0)
+
         # ACK first - FreeSWITCH activates the media session on ACK,
         # then punch a hole from the offer port so it can send RTP back.
-        self._ack()
-        self._send_picture_fast_update()
+        # (may already have been sent right after answering the device INFO)
+        if not self._acked:
+            self._acked = True
+            self._ack()
+        acked = True
         self._hole_punch()
+
+        # After the ACK keep draining briefly: late INFO and the final
+        # 200 OK may arrive now - answer INFO and refresh media target.
+        _drain_and_answer(2.0)
+
+        # Confirm real video actually flows before declaring success: a
+        # 183 early-media gate that rings then answers streams only a few
+        # probe packets (the app abandons those attempts too - only the
+        # attempt where the device answers straight away streams video).
+        # Require a *sustained* packet stream: enough packets AND no quiet
+        # gap, so a ringtone trickle is never mistaken for a live stream.
+        min_packets = getattr(self, "min_video_packets", 10)
+        deadline = time.time() + 5.0
+        last_pkt = 0.0
+        count = 0
+        while time.time() < deadline:
+            c = getattr(self, "_video_packet_count", 0)
+            if c > count:
+                count = c
+                last_pkt = time.time()
+            if count >= min_packets and time.time() - last_pkt > 1.2:
+                break  # stream went quiet -> early-media trickle, retry
+            if count >= min_packets * 4:
+                break  # strong real stream
+            time.sleep(0.1)
+        sustained = count >= min_packets and (
+            time.time() - last_pkt <= 1.2 or count >= min_packets * 4
+        )
+        if not sustained:
+            try:
+                self._bye()
+            except Exception:
+                pass
+            self._cleanup_after_fail()
+            return {
+                "ok": False,
+                "status": final_code,
+                "error": f"answered but no sustained video ({count} pkts)",
+            }
+
         _LOGGER.info("Monitor call active: %s", self.gt_uri)
         return {
             "ok": True,
@@ -747,6 +1089,34 @@ class SipMonitorCall:
             except OSError:
                 pass
             self._sock = None
+
+    def _reset_session(self) -> None:
+        """Reset per-call state before a retry attempt."""
+        if self._rtp_sock is not None:
+            try:
+                self._rtp_sock.close()
+            except OSError:
+                pass
+            self._rtp_sock = None
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+        self._pending_msg = None
+        self._acked = False
+        self._record_routes = None
+        self._remote_tag = None
+        self._remote_contact = None
+        self._video_received = False
+        self._video_packet_count = 0
+        self._rtp_thread = None
+        self._stream_ssrc = None
+        self._last_ts = None
+        self._last_seq = None
+        self.sps = None
+        self.pps = None
 
     def stop(self) -> None:
         """Stop RTP receiver, send BYE, close sockets."""
