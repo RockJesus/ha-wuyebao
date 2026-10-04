@@ -70,6 +70,23 @@ class VideoSessionManager:
                 return None
 
             for attempt in range(3):
+                # The app activates the device before placing the media call:
+                # it sends the monitor SIP MESSAGE so the gate enters an
+                # answerable state. South wall gate accepts a direct INVITE,
+                # but north gate and unit doors answer "486 Busy Here" unless
+                # they have been activated first. Best-effort: if the MESSAGE
+                # fails (some devices reject it), still try the INVITE.
+                try:
+                    await client.start_monitor(gate)
+                    _LOGGER.info(
+                        "Monitor MESSAGE sent for %s (%s)", gate_id, gt_uri
+                    )
+                except Exception as err:
+                    _LOGGER.warning(
+                        "Monitor MESSAGE failed for %s: %s (continuing)", gate_id, err
+                    )
+                await asyncio.sleep(1.5)
+
                 call = SipMonitorCall(
                     user=client.username,
                     jwt=client.sip_jwt,
@@ -87,7 +104,11 @@ class VideoSessionManager:
                         "Monitor call start failed for %s: %s", gate_id, result
                     )
                     if attempt < 2:
-                        await asyncio.sleep(4)
+                        # 486 Busy Here / 100 Trying w/o final response: the
+                        # gate may still be clearing the previous session.
+                        # Back off longer than the old 4s so the device can
+                        # release the busy state.
+                        await asyncio.sleep(6 + attempt * 6)
                         continue
                     return None
                 # wait for actual video RTP (SPS/PPS); retry on failure
@@ -100,7 +121,7 @@ class VideoSessionManager:
                 )
                 await asyncio.to_thread(call.stop)
                 if attempt < 2:
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(6 + attempt * 6)
             return None
 
     def add_subscriber(self, gate_id: str, s: socket.socket, target: tuple) -> bool:
