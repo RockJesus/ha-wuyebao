@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import socket
 import struct
 import threading
@@ -298,7 +299,15 @@ class SipMonitorCall:
         first_line = reply.split("\r\n", 1)[0] if reply else ""
         code = 0
         reason = ""
-        if first_line.startswith("SIP/2.0 "):
+        # The server may coalesce "100 Trying" with the real final
+        # response (183/200/486) into a single TCP segment.  Scanning only
+        # the first status line would then drop the final response and make
+        # us treat a successful call as a timeout.  Scan ALL status lines
+        # and keep the last one.
+        for m in re.finditer(rb"SIP/2\.0 (\d{3}) ([^\r\n]*)", reply.encode("latin-1", "replace")):
+            code = int(m.group(1))
+            reason = m.group(2).decode("latin-1", "replace")
+        if first_line.startswith("SIP/2.0 ") and code == 0:
             parts = first_line[8:].split(" ", 1)
             try:
                 code = int(parts[0])
@@ -642,17 +651,26 @@ class SipMonitorCall:
             self._cleanup_after_fail()
             return {"ok": False, "status": code, "error": f"INVITE {reason}"}
 
-        # wait for the final response (200 OK) - 183/100 are provisional
+        # wait for the final response (200 OK) - 183/100 are provisional.
+        # IMPORTANT: a receive timeout means "no data yet", NOT "final
+        # response arrived" - keep waiting until the deadline.  South wall
+        # gate answers 183 quickly, but north gate / unit doors take much
+        # longer to set up the media session (device wake-up).  Treating a
+        # short silence after "100 Trying" as failure caused us to give up
+        # early and then hammer the device with retries, which made it
+        # return "486 Busy Here" for the next INVITE.
         sdp = raw.partition("\r\n\r\n")[2]
         final_code = code
-        deadline = time.time() + 8.0
+        deadline = time.time() + 15.0
         while time.time() < deadline:
             try:
                 extra = _recv_full(self._sock, min(2.0, deadline - time.time()))
+            except socket.timeout:
+                continue  # no data yet, keep waiting for the final response
             except OSError:
                 break
             if not extra:
-                break
+                break  # connection closed
             up = extra.upper()
             if up.startswith("SIP/2.0 "):
                 try:
