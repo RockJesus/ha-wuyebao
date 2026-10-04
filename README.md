@@ -118,6 +118,22 @@ Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业�
 
 ## 更新日志
 
+### v6.6.5
+- 依据官方 App（v1.1.1.53）SIP 抓包证据修正监控流程：**App 实时监控为纯 INVITE 呼叫，无前置"monitor"MESSAGE 激活**；移除 6.6.3 加入的 INVITE 前激活 MESSAGE + 1.5s 等待（该假设未解决 486 Busy Here）
+- INVITE/REGISTER 报文对齐官方 App：INVITE 的 From 使用无尖括号格式；REGISTER 增加 `Allow` 头声明
+- 保留 6.6.4 的最终响应等待修复（100 Trying 后继续等待至 15s 截止、粘包多状态行解析）与 6s/12s 递增退避重试
+
+### v6.6.4
+- 修复 INVITE 最终响应被误判失败：收到 100 Trying 后 2s 无新消息即误判退出 → 现在持续等待直到 15s 截止（socket.timeout 继续等待，仅连接关闭才退出）
+- 修复 SIP 响应粘包：同一 TCP 段中 100 Trying 与最终响应（183/200/486）共存时，扫描所有状态行取最后一个
+
+### v6.6.3
+- 修复北门/单元门实时监控：INVITE 前 best-effort 发送 monitor MESSAGE 激活设备（后经 6.6.5 抓包证实 App 并不需要，已移除）
+
+### v6.6.2
+- 修复摄像头实时画面：`camera.stream_source` 改为 async 方法（HA 2024.11+ 按 `await camera.stream_source()` 调用）；声明 `CameraEntityFeature.STREAM`
+- H264 SPS/PPS 参数集注入：设备每 ~1.2s 轮换参数集 ID，中途接入 RTSP 会报 `non-existing PPS`，现于 PLAY 后注入最新 SPS/PPS
+
 ### v6.6.1
 - 集成域名由 `propertybao` 更改为 **`wuyebao`**（项目更名，仓库地址：https://github.com/RockJesus/ha-wuyebao）
 - 隐私审计：代码内无硬编码手机号、密码、用户 token 等个人信息；`client_id`/SIP 凭据为 App 公共标识（非个人数据）
