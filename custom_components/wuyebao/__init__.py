@@ -7,6 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers import entity_registry as er
 
 from .const import CONF_PASSWORD, CONF_USERNAME, DOMAIN
 from .api import WuYeBaoClient
@@ -18,7 +19,6 @@ PLATFORMS: list[Platform] = [
     Platform.LOCK,
     Platform.SENSOR,
     Platform.CAMERA,
-    Platform.BUTTON,
 ]
 
 
@@ -47,6 +47,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
 
     hass.data[DOMAIN][entry.entry_id] = client
+
+    # Remove legacy "查看监控" button entities (button platform removed in
+    # 6.6.6; live monitoring is exposed directly by the camera entities).
+    ent_reg = er.async_get(hass)
+    for entity_id, ent in list(ent_reg.entities.items()):
+        if (
+            ent.config_entry_id == entry.entry_id
+            and ent.unique_id
+            and ent.unique_id.startswith(f"{entry.entry_id}_monitor_")
+        ):
+            ent_reg.async_remove(entity_id)
 
     # Live video: RTSP server + session manager (one per integration instance)
     manager = VideoSessionManager()
