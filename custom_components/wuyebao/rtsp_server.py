@@ -39,6 +39,10 @@ class VideoSessionManager:
         entry = self._gates.get(gate_id)
         return entry.get("gate") if entry else None
 
+    def get_session(self, gate_id: str) -> SipMonitorCall | None:
+        """Return the active monitor session without starting a new call."""
+        return self._sessions.get(gate_id)
+
     async def get_or_start(self, gate_id: str) -> SipMonitorCall | None:
         """Return the active monitor session for gate_id, starting it if needed."""
         async with self._lock:
@@ -106,11 +110,30 @@ class VideoSessionManager:
         sess.add_subscriber(s, target)
         return True
 
+    def add_tcp_subscriber(self, gate_id: str, loop, writer, channel: int = 0) -> bool:
+        sess = self._sessions.get(gate_id)
+        if sess is None:
+            return False
+        sess.add_tcp_subscriber(loop, writer, channel)
+        return True
+
     def remove_subscriber(self, gate_id: str, s: socket.socket, target: tuple) -> None:
         sess = self._sessions.get(gate_id)
         if sess is None:
             return
         sess.remove_subscriber(s, target)
+        # schedule idle stop
+        loop = asyncio.get_event_loop()
+        loop.call_later(
+            IDLE_STOP_AFTER,
+            lambda gid=gate_id: asyncio.ensure_future(self._idle_stop(gid)),
+        )
+
+    def remove_tcp_subscriber(self, gate_id: str, loop, writer, channel: int = 0) -> None:
+        sess = self._sessions.get(gate_id)
+        if sess is None:
+            return
+        sess.remove_tcp_subscriber(loop, writer, channel)
         # schedule idle stop
         loop = asyncio.get_event_loop()
         loop.call_later(
@@ -205,12 +228,18 @@ class RtspClientConnection:
         self._manager = manager
         self._reader = reader
         self._writer = writer
+        self._loop = asyncio.get_event_loop()
         self._gate_id: str | None = None
         self._rtp_sock: socket.socket | None = None
         self._client_rtp_port: int | None = None
         self._server_rtcp_sock: socket.socket | None = None
         self._playing = False
         self._session_id: str | None = None
+        # RTP-over-TCP (interleaved) support
+        self._tcp_transport = False
+        self._channel = 0
+        # leftover bytes after a parsed request (pipelined/coalesced requests)
+        self._pending = b""
 
     async def run(self) -> None:
         try:
@@ -230,7 +259,8 @@ class RtspClientConnection:
                 pass
 
     async def _read_request(self) -> dict | None:
-        header = b""
+        header = self._pending
+        self._pending = b""
         while b"\r\n\r\n" not in header:
             chunk = await self._reader.read(4096)
             if not chunk:
@@ -238,9 +268,15 @@ class RtspClientConnection:
             header += chunk
             if len(header) > 65536:
                 return None
-        head, _, _body = header.partition(b"\r\n\r\n")
+        head, _, body = header.partition(b"\r\n\r\n")
+        # Keep any bytes that follow this request for the next _read_request,
+        # otherwise a pipelined request (e.g. OPTIONS + DESCRIBE coalesced in
+        # one TCP segment, which ffmpeg does) would be silently dropped and
+        # the client would hang waiting for a response.
+        self._pending = body
         lines = head.decode("latin-1", errors="replace").split("\r\n")
         if not lines or not lines[0]:
+            _LOGGER.info("RTSP empty request line from %s", self._writer.get_extra_info("peername"))
             return None
         parts = lines[0].split(" ")
         if len(parts) < 3:
@@ -261,11 +297,15 @@ class RtspClientConnection:
             lines.append(f"{k}: {v}")
         if body:
             lines.append(f"Content-Length: {len(body.encode('utf-8'))}")
-        lines.append("")
-        lines.append("")
+        # Join the header lines, terminate the header block with exactly one
+        # blank line ("\r\n\r\n"), then append the body. Using join with empty
+        # trailing elements would insert an extra CRLF between the header and
+        # the body, misaligning Content-Length and leaving stray bytes that
+        # corrupt the next RTSP response (ffmpeg then sees CSeq 0 and aborts).
+        packet = "\r\n".join(lines) + "\r\n\r\n"
         if body:
-            lines.append(body)
-        self._writer.write(("\r\n".join(lines)).encode("utf-8"))
+            packet += body
+        self._writer.write(packet.encode("utf-8"))
         await self._writer.drain()
 
     async def _dispatch(self, req: dict) -> bool:
@@ -277,6 +317,7 @@ class RtspClientConnection:
         gate_id = path.split("/")[0].split("?")[0]
 
         if method == "OPTIONS":
+            _LOGGER.info("RTSP OPTIONS cseq=%s from %s", cseq, self._writer.get_extra_info("peername"))
             await self._send(
                 "200 OK",
                 {
@@ -309,6 +350,29 @@ class RtspClientConnection:
 
         if method == "SETUP":
             transport = req["headers"].get("transport", "")
+            _LOGGER.info("RTSP SETUP cseq=%s transport=%s from %s", cseq, transport[:60], self._writer.get_extra_info("peername"))
+            # RTP over TCP (interleaved) - used by ffmpeg / HA stream component
+            if "RTP/AVP/TCP" in transport.upper() or "interleaved=" in transport.lower():
+                channel = 0
+                for part in transport.split(";"):
+                    if part.strip().lower().startswith("interleaved="):
+                        try:
+                            channel = int(part.strip().split("=")[1].split("-")[0])
+                        except (ValueError, IndexError):
+                            channel = 0
+                self._tcp_transport = True
+                self._channel = channel
+                self._session_id = uuid.uuid4().hex[:16]
+                await self._send(
+                    "200 OK",
+                    {
+                        "CSeq": cseq,
+                        "Session": self._session_id,
+                        "Transport": f"RTP/AVP/TCP;unicast;interleaved={channel}-{channel + 1}",
+                    },
+                )
+                return True
+
             client_port = None
             for part in transport.split(";"):
                 if part.strip().startswith("client_port="):
@@ -340,16 +404,14 @@ class RtspClientConnection:
             return True
 
         if method == "PLAY":
-            if self._gate_id is None or self._rtp_sock is None or self._client_rtp_port is None:
+            if self._gate_id is None:
                 await self._send("454 Session Not Found", {"CSeq": cseq})
                 return True
-            peer = self._writer.get_extra_info("peername")
-            client_ip = peer[0] if peer else "127.0.0.1"
-            # forward RTP to client
-            ok = self._manager.add_subscriber(
-                self._gate_id, self._rtp_sock, (client_ip, self._client_rtp_port)
-            )
-            self._playing = ok
+            # Send the 200 OK FIRST so the client (ffmpeg/PyAV) sees a clean
+            # RTSP response before any interleaved RTP frames arrive. If the
+            # subscriber is registered first, RTP frames can be interleaved
+            # into the middle of the response and the client aborts with
+            # "Invalid data found when processing input".
             await self._send(
                 "200 OK",
                 {
@@ -358,6 +420,36 @@ class RtspClientConnection:
                     "RTP-Info": f"url=rtsp://127.0.0.1:8556/{self._gate_id}/track1",
                 },
             )
+            if self._tcp_transport:
+                self._manager.add_tcp_subscriber(
+                    self._gate_id, self._loop, self._writer, self._channel
+                )
+                # Inject the latest SPS/PPS right after PLAY so the first IDR
+                # is decodable: the device rotates parameter-set ids every
+                # ~1.2s, so a client joining mid-call would otherwise see
+                # "non-existing PPS" on its first frame and PyAV/HA stream
+                # would abort instead of recovering.
+                sess = self._manager.get_session(self._gate_id)
+                if sess is not None:
+                    for pkt in sess.build_paramset_packets():
+                        frame = (
+                            b"$"
+                            + bytes([self._channel])
+                            + len(pkt).to_bytes(2, "big")
+                            + pkt
+                        )
+                        self._writer.write(frame)
+                    await self._writer.drain()
+            elif self._rtp_sock is not None and self._client_rtp_port is not None:
+                peer = self._writer.get_extra_info("peername")
+                client_ip = peer[0] if peer else "127.0.0.1"
+                self._manager.add_subscriber(
+                    self._gate_id, self._rtp_sock, (client_ip, self._client_rtp_port)
+                )
+            else:
+                await self._send("454 Session Not Found", {"CSeq": cseq})
+                return True
+            self._playing = True
             return True
 
         if method == "TEARDOWN":
@@ -379,16 +471,27 @@ class RtspClientConnection:
             "a=rtpmap:97 H264/90000",
         ]
         sps, pps = sess.get_sps_pps()
-        if sps and pps and len(sps) > 4 and len(pps) > 4:
-            # sprop-parameter-sets expects the NAL payload WITHOUT the 1-byte header
-            sps_b64 = base64.b64encode(sps[1:]).decode("ascii")
-            pps_b64 = base64.b64encode(pps[1:]).decode("ascii")
-            lines.append(f"a=fmtp:97 packetization-mode=1;profile-level-id={sps[1:4].hex()};sprop-parameter-sets={sps_b64},{pps_b64}")
+        # Always advertise packetization-mode=1 so ffmpeg/PyAV parses
+        # FU-A fragments correctly, even if SPS/PPS have not arrived yet.
+        fmtp = "a=fmtp:97 packetization-mode=1"
+        if sps and len(sps) > 4:
+            # profile-level-id is stable per codec level; omit
+            # sprop-parameter-sets on purpose: the cached SPS/PPS can come
+            # from a different call/session and referencing the wrong IDs
+            # makes ffmpeg fail with "non-existing PPS xx referenced".
+            # ffmpeg extracts parameter sets from the RTP stream itself.
+            fmtp += f";profile-level-id={sps[1:4].hex()}"
+        lines.append(fmtp)
         lines.append("a=control:track1")
         return "\r\n".join(lines) + "\r\n"
 
     async def _teardown(self) -> None:
-        if self._gate_id and self._rtp_sock is not None and self._client_rtp_port is not None:
+        if self._tcp_transport:
+            if self._gate_id is not None:
+                self._manager.remove_tcp_subscriber(
+                    self._gate_id, self._loop, self._writer, self._channel
+                )
+        elif self._gate_id and self._rtp_sock is not None and self._client_rtp_port is not None:
             peer = self._writer.get_extra_info("peername")
             client_ip = peer[0] if peer else "127.0.0.1"
             self._manager.remove_subscriber(
