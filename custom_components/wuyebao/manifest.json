@@ -1,12 +1,18 @@
 {
   "domain": "wuyebao",
   "name": "物业宝",
-  "codeowners": ["@RockJesus"],
+  "codeowners": [
+    "@RockJesus"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/RockJesus/ha-wuyebao",
   "issue_tracker": "https://github.com/RockJesus/ha-wuyebao/issues",
   "requirements": [],
   "version": "6.6.7",
   "iot_class": "cloud_polling",
-  "loggers": ["custom_components.wuyebao"]
+  "loggers": [
+    "custom_components.wuyebao"
+  ],
+  "integration_type": "hub",
+  "homeassistant": "2024.6.0"
 }
