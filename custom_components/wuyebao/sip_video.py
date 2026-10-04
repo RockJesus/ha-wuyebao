@@ -29,6 +29,14 @@ SIP_UA = "JHCloud-android-m-SV:1.0-V:1.1.1.53"
 SIP_ROUTE = "<sip:new-sip.jhws.top;transport=tcp;lr>"
 
 
+def _write_interleaved(writer, frame: bytes) -> None:
+    """Thread-safe frame writer for RTP-over-TCP (runs in the event loop)."""
+    try:
+        writer.write(frame)
+    except Exception:  # noqa: BLE001 - subscriber may have gone away
+        pass
+
+
 def _gen_branch() -> str:
     return "z9hG4bK" + uuid.uuid4().hex[:24]
 
@@ -146,6 +154,12 @@ class SipMonitorCall:
         self._running = threading.Event()
         self._lock = threading.Lock()
         self._ssrc: int | None = None
+        # Live stream metadata so injected parameter-set packets can share
+        # the stream's SSRC/timestamp/sequence (ffmpeg ignores RTP packets
+        # whose SSRC differs from the media stream).
+        self._stream_ssrc: int | None = None
+        self._last_ts: int | None = None
+        self._last_seq: int | None = None
 
         self.media_ip: str | None = None
         self.media_video_port: int | None = None
@@ -161,8 +175,10 @@ class SipMonitorCall:
         self.pps: bytes | None = None
         self._sps_pps_lock = threading.Lock()
 
-        # RTSP subscribers: (socket, (ip, port)) to forward RTP to
+        # RTSP subscribers: (socket, (ip, port)) to forward RTP to (UDP)
         self._subscribers: list[tuple[socket.socket, tuple]] = []
+        # RTP-over-TCP subscribers: (loop, writer, channel) (interleaved)
+        self._tcp_subscribers: list[tuple[object, object, int]] = []
 
     @staticmethod
     def _discover_local_ip() -> str:
@@ -464,6 +480,11 @@ class SipMonitorCall:
                     _LOGGER.debug("Non-video RTP from %s: pt=%d len=%d", addr, pt, len(data))
                     continue
                 received_rtp = True
+                # Track the stream's SSRC/timestamp/sequence so injected
+                # parameter-set packets look like part of the media stream.
+                self._stream_ssrc = int.from_bytes(data[8:12], "big")
+                self._last_ts = int.from_bytes(data[4:8], "big")
+                self._last_seq = int.from_bytes(data[2:4], "big")
                 if _LOGGER.isEnabledFor(logging.DEBUG) and received_rtp and not getattr(self, "_logged_first_rtp", False):
                     self._logged_first_rtp = True
                     _LOGGER.debug("First video RTP from %s len=%d", addr, len(data))
@@ -498,6 +519,7 @@ class SipMonitorCall:
                 # Forward raw RTP to RTSP subscribers
                 with self._lock:
                     subs = list(self._subscribers)
+                    tcp_subs = list(self._tcp_subscribers)
                 dead = []
                 for s, target in subs:
                     try:
@@ -509,6 +531,21 @@ class SipMonitorCall:
                         for d in dead:
                             if d in self._subscribers:
                                 self._subscribers.remove(d)
+                # RTP-over-TCP: wrap in interleaved frames ($ <ch> <len> <rtp>)
+                for loop, writer, channel in tcp_subs:
+                    frame = (
+                        b"$"
+                        + bytes([channel])
+                        + len(data).to_bytes(2, "big")
+                        + data
+                    )
+                    try:
+                        loop.call_soon_threadsafe(_write_interleaved, writer, frame)
+                    except RuntimeError:
+                        # event loop closed
+                        with self._lock:
+                            if (loop, writer, channel) in self._tcp_subscribers:
+                                self._tcp_subscribers.remove((loop, writer, channel))
         finally:
             self._running.clear()
 
@@ -517,18 +554,51 @@ class SipMonitorCall:
             if (s, target) not in self._subscribers:
                 self._subscribers.append((s, target))
 
+    def add_tcp_subscriber(self, loop, writer, channel: int = 0) -> None:
+        with self._lock:
+            if (loop, writer, channel) not in self._tcp_subscribers:
+                self._tcp_subscribers.append((loop, writer, channel))
+
     def remove_subscriber(self, s: socket.socket, target: tuple) -> None:
         with self._lock:
             if (s, target) in self._subscribers:
                 self._subscribers.remove((s, target))
 
+    def remove_tcp_subscriber(self, loop, writer, channel: int = 0) -> None:
+        with self._lock:
+            if (loop, writer, channel) in self._tcp_subscribers:
+                self._tcp_subscribers.remove((loop, writer, channel))
+
     def subscriber_count(self) -> int:
         with self._lock:
-            return len(self._subscribers)
+            return len(self._subscribers) + len(self._tcp_subscribers)
 
     def get_sps_pps(self) -> tuple[bytes | None, bytes | None]:
         with self._sps_pps_lock:
             return self.sps, self.pps
+
+    def build_paramset_packets(self) -> list[bytes]:
+        """Build RTP packets carrying the latest SPS/PPS.
+
+        A freshly connected RTSP client (ffmpeg/PyAV) may join the stream
+        mid-call, right after the device rotated to a new parameter-set id;
+        its first IDR then references a PPS it has not seen and decode aborts
+        ("non-existing PPS"). Injecting the latest SPS/PPS right after PLAY
+        lets the client register the parameter sets before the next IDR. The
+        device re-sends SPS/PPS every ~1.2s so any transient mismatch heals.
+        """
+        with self._sps_pps_lock:
+            sps, pps = self.sps, self.pps
+        if not sps or not pps:
+            return []
+        ssrc = self._stream_ssrc or 0x5A5A5A5A
+        ts = self._last_ts if self._last_ts is not None else int(time.time() * 90000) & 0xFFFFFFFF
+        seq = (self._last_seq or 0) & 0xFFFF
+        pkts: list[bytes] = []
+        for nal in (sps, pps):
+            seq = (seq + 1) & 0xFFFF
+            pkts.append(struct.pack(">BBHII", 0x80, 97, seq, ts, ssrc) + nal)
+        return pkts
 
     def wait_for_video(self, timeout: float) -> bool:
         """Block until the first H264 video frame (SPS/PPS) is seen."""
