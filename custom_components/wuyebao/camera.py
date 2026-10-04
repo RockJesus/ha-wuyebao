@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.camera import Camera
+from homeassistant.components.camera import Camera, CameraEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -180,10 +180,21 @@ class WuYeBaoLiveCamera(Camera):
         self._attr_unique_id = f"{entry_id}_live_camera_{self._gid}"
         self._attr_device_info = self._build_device_info(gate)
 
-    @property
-    def stream_source(self) -> str | None:
-        """Return the RTSP stream URL for this gate's live video."""
+    async def stream_source(self) -> str | None:
+        """Return the RTSP stream URL for this gate's live video.
+
+        NOTE: HA >= 2024.x calls ``await camera.stream_source()`` as an
+        async method (not a property); returning a str from a property
+        raises ``TypeError: 'str' object is not callable`` in
+        camera/webrtc.py's async_get_supported_provider.
+        """
         return f"rtsp://127.0.0.1:8556/{self._gid}"
+
+    @property
+    def supported_features(self) -> CameraEntityFeature:
+        """Advertise STREAM so the HA frontend enables live playback
+        (without this flag the UI only shows the snapshot image)."""
+        return CameraEntityFeature.STREAM
 
     def _build_device_info(self, gate: dict[str, Any]) -> DeviceInfo:
         return DeviceInfo(
