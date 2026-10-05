@@ -325,9 +325,12 @@ class SipMonitorCall:
             f"INVITE sip:{self.gt_uri}@{SIP_REALM};transport=tcp SIP/2.0",
             f"Via: SIP/2.0/TCP {self._local_ip}:5060;rport;branch={branch};alias",
             "Max-Forwards: 70",
-            # official app uses bare From/To URIs (no angle brackets) in INVITE
-            f"From: sip:{self.user}@{SIP_REALM};tag={tag}",
-            f"To: sip:{self.gt_uri}@{SIP_REALM}",
+            # v6.6.3 used angle-bracketed From/To here; unit/north gate
+            # devices REQUIRE that form (bare URIs answer INVITE with
+            # 183/200 but never push RTP -> "answered but no sustained
+            # video (0 pkts)" observed on north gate / unit doors).
+            f"From: <sip:{self.user}@{SIP_REALM}>;tag={tag}",
+            f"To: <sip:{self.gt_uri}@{SIP_REALM}>",
             f"Contact: {contact}",
             f"Call-ID: {call_id}",
             "CSeq: 2 INVITE",
