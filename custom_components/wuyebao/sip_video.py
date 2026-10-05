@@ -1100,10 +1100,13 @@ class SipMonitorCall:
                 self._ack()
 
         if final_code in (180, 183):
-            # Give the final 200 OK up to 10s to arrive after the 183 early
-            # media (north/unit gates take 3-8s to send it); when it does we
-            # ACK it (final-response ACK activates the media session).
-            _drain_and_answer(10.0)
+            # Give the final 200 OK up to 25s to arrive after the 183 early
+            # media (v6.6.6 used a 25s final-response window because the
+            # north gate / unit doors take much longer than 10s to send
+            # it); when it does we ACK it (final-response ACK activates the
+            # media session).  A later 200 means the ACK + INFO used the
+            # 183 tag and the gate never starts its IDR stream.
+            _drain_and_answer(25.0)
 
         # ACK first - FreeSWITCH activates the media session on ACK,
         # then punch a hole from the offer port so it can send RTP back.
