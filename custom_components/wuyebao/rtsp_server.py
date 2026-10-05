@@ -31,6 +31,8 @@ class VideoSessionManager:
         self._gates: dict[str, dict] = {}
         self._client: object | None = None  # WuYeBaoClient
         self._lock = asyncio.Lock()
+        self._watchdog_task: asyncio.Task | None = None
+        self._restarting: set[str] = set()
 
     def register_gate(self, gate_id: str, gate: dict, client) -> None:
         self._gates[gate_id] = {"gate": gate, "client": client}
@@ -46,78 +48,145 @@ class VideoSessionManager:
     async def get_or_start(self, gate_id: str) -> SipMonitorCall | None:
         """Return the active monitor session for gate_id, starting it if needed."""
         async with self._lock:
-            sess = self._sessions.get(gate_id)
-            if sess is not None:
-                return sess
-            entry = self._gates.get(gate_id)
-            if not entry:
-                return None
-            gate = entry["gate"]
-            client = entry["client"]
+            return await self._start_locked(gate_id)
 
-            gt_uri = _build_gt_uri(gate)
-            if not gt_uri:
-                return None
-            display_name = _build_display_name(gate)
-
-            # make sure the SIP JWT is fresh before placing the call
-            try:
-                await client.ensure_sip_token()
-            except Exception as err:
-                _LOGGER.warning("Failed to refresh SIP token for video: %s", err)
-
-            if not getattr(client, "sip_jwt", None) or not getattr(client, "owner_id", None):
-                return None
-
-            for attempt in range(5):
-                # Packet capture of the official app (v1.1.1.53, 2026-10-04)
-                # proves the monitor flow is a plain INVITE: the app does
-                # NOT send a "monitor" SIP MESSAGE before the call (its
-                # MESSAGEs are only unlock requests).  The pre-INVITE
-                # activation MESSAGE added in 6.6.3 was based on a wrong
-                # assumption and did not fix the "486 Busy Here" replies.
-                # Keep the INVITE-only flow; retries use a growing backoff
-                # (10/20/30/45s) so a gate can release its busy state
-                # (the app keeps a monitor session ~30s after BYE) before
-                # retrying.  5 attempts cover the typical release window.
-                call = SipMonitorCall(
-                    user=client.username,
-                    jwt=client.sip_jwt,
-                    sid=client.sip_sid,
-                    gt_uri=gt_uri,
-                    display_name=display_name,
-                )
-                _LOGGER.info(
-                    "Starting monitor call for %s (%s) attempt %d/5",
-                    gate_id, gt_uri, attempt + 1,
-                )
-                result = await asyncio.to_thread(call.start)
-                if not result.get("ok"):
-                    _LOGGER.error(
-                        "Monitor call start failed for %s: %s", gate_id, result
-                    )
-                    if attempt < 4:
-                        # 486 Busy Here / 100 Trying w/o final response: the
-                        # gate may still be clearing the previous session.
-                        # Back off longer than the app's session hold time so
-                        # the device can release the busy state.
-                        await asyncio.sleep(10 + attempt * 10 if attempt < 3 else 15 + (attempt - 2) * 15)
-                        continue
-                    return None
-                # wait for actual video RTP (SPS/PPS); retry on failure.
-                # North gate / some devices take >10s to stream media after
-                # the 200 OK, so wait longer than the old 10s.
-                got_video = await asyncio.to_thread(call.wait_for_video, 20.0)
-                if got_video:
-                    self._sessions[gate_id] = call
-                    return call
-                _LOGGER.warning(
-                    "No video media for %s, tearing down and retrying", gate_id
-                )
-                await asyncio.to_thread(call.stop)
-                if attempt < 4:
-                    await asyncio.sleep(10 + attempt * 10 if attempt < 3 else 15 + (attempt - 2) * 15)
+    async def _start_locked(self, gate_id: str) -> SipMonitorCall | None:
+        """Start (or reuse) the monitor session for gate_id. Caller holds the lock."""
+        sess = self._sessions.get(gate_id)
+        if sess is not None:
+            return sess
+        entry = self._gates.get(gate_id)
+        if not entry:
             return None
+        gate = entry["gate"]
+        client = entry["client"]
+
+        gt_uri = _build_gt_uri(gate)
+        if not gt_uri:
+            return None
+        display_name = _build_display_name(gate)
+
+        # make sure the SIP JWT is fresh before placing the call
+        try:
+            await client.ensure_sip_token()
+        except Exception as err:
+            _LOGGER.warning("Failed to refresh SIP token for video: %s", err)
+
+        if not getattr(client, "sip_jwt", None) or not getattr(client, "owner_id", None):
+            return None
+
+        # Outer retry backoff (seconds).  Short enough that an RTSP client
+        # (go2rtc / HA player) keeps waiting instead of disconnecting and
+        # reconnecting in a loop; the inner SipMonitorCall.start() already
+        # retries the INVITE 6x quickly for the "busy then answers on the
+        # last attempt" behaviour of the official app.
+        backoffs = (4, 6, 10, 15)
+        for attempt in range(5):
+            call = SipMonitorCall(
+                user=client.username,
+                jwt=client.sip_jwt,
+                sid=client.sip_sid,
+                gt_uri=gt_uri,
+                display_name=display_name,
+            )
+            _LOGGER.info(
+                "Starting monitor call for %s (%s) attempt %d/5",
+                gate_id, gt_uri, attempt + 1,
+            )
+            result = await asyncio.to_thread(call.start)
+            if not result.get("ok"):
+                _LOGGER.error(
+                    "Monitor call start failed for %s: %s", gate_id, result
+                )
+                if attempt < 4:
+                    await asyncio.sleep(backoffs[attempt])
+                    continue
+                return None
+            # wait for actual video RTP (SPS/PPS); retry on failure.
+            # North gate / some devices take >10s to stream media after
+            # the 200 OK, so wait longer than the old 10s.
+            got_video = await asyncio.to_thread(call.wait_for_video, 20.0)
+            if got_video:
+                self._sessions[gate_id] = call
+                return call
+            _LOGGER.warning(
+                "No video media for %s, tearing down and retrying", gate_id
+            )
+            await asyncio.to_thread(call.stop)
+            if attempt < 4:
+                await asyncio.sleep(backoffs[attempt])
+        return None
+
+    # ------------------------------------------------------------------
+    # stream-health watchdog: gates stop pushing RTP after ~30s, which
+    # freezes the picture; detect the silence and rebuild the session so
+    # the live view continues without user interaction.
+    # ------------------------------------------------------------------
+    SILENCE_THRESHOLD = 10.0  # seconds without video RTP -> rebuild
+    WATCHDOG_INTERVAL = 3.0
+
+    def start_watchdog(self) -> None:
+        """Start the background watchdog loop (idempotent)."""
+        if self._watchdog_task is not None and not self._watchdog_task.done():
+            return
+        self._watchdog_task = asyncio.get_event_loop().create_task(
+            self._watchdog_loop()
+        )
+
+    async def stop_watchdog(self) -> None:
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._watchdog_task = None
+
+    async def _watchdog_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self.WATCHDOG_INTERVAL)
+                try:
+                    await self._watchdog_tick()
+                except Exception as err:
+                    _LOGGER.debug("Watchdog tick error: %s", err)
+        except asyncio.CancelledError:
+            pass
+
+    async def _watchdog_tick(self) -> None:
+        async with self._lock:
+            stalled = [
+                gid
+                for gid, sess in self._sessions.items()
+                if sess.subscriber_count() > 0
+                and not sess.is_stream_alive(self.SILENCE_THRESHOLD)
+            ]
+            for gid in stalled:
+                if gid in self._restarting:
+                    continue
+                self._restarting.add(gid)
+                sess = self._sessions.pop(gid, None)
+                if sess is not None:
+                    _LOGGER.warning(
+                        "Monitor stream %s silent for %.0fs - rebuilding session",
+                        gid, self.SILENCE_THRESHOLD,
+                    )
+                    asyncio.ensure_future(self._restart(gid))
+        # keep the set from growing unbounded across many rebuilds
+        if len(self._restarting) > 64:
+            self._restarting.clear()
+
+    async def _restart(self, gate_id: str) -> None:
+        """Rebuild a stalled session (runs outside the lock)."""
+        try:
+            async with self._lock:
+                sess = self._sessions.get(gate_id)
+                if sess is not None:
+                    await asyncio.to_thread(sess.stop)
+                    self._sessions.pop(gate_id, None)
+                await self._start_locked(gate_id)
+        finally:
+            self._restarting.discard(gate_id)
 
     def add_subscriber(self, gate_id: str, s: socket.socket, target: tuple) -> bool:
         sess = self._sessions.get(gate_id)
@@ -168,6 +237,7 @@ class VideoSessionManager:
         await asyncio.to_thread(sess.stop)
 
     async def shutdown(self) -> None:
+        await self.stop_watchdog()
         async with self._lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
