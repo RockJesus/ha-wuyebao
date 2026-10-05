@@ -149,6 +149,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN][entry.entry_id] = client
 
+    # Pre-warm the gate list right after login and share it across platforms
+    # (lock/sensor/switch/camera/button all read the same cached list), so a
+    # transient API failure during parallel setup cannot leave some platforms
+    # with an empty door list.
+    try:
+        await client.ensure_gates()
+        _LOGGER.info("Pre-warmed gate list: %d gates", len(client.gates or []))
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Pre-warm gate list failed: %s", err)
+
     # Remove legacy "查看监控" button entities (button platform removed in
     # 6.6.6; live monitoring is exposed directly by the camera entities).
     ent_reg = er.async_get(hass)

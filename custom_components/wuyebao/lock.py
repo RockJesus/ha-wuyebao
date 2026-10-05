@@ -25,7 +25,7 @@ async def async_setup_entry(
     client: WuYeBaoClient = hass.data[DOMAIN][entry.entry_id]
 
     try:
-        gates = await client.get_gates()
+        gates = await client.ensure_gates()
         _LOGGER.info("Found %d gates", len(gates))
         # Log raw gates for debugging
         for i, gate in enumerate(gates):

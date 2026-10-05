@@ -58,7 +58,7 @@ async def async_setup_entry(
     # One stream-address sensor per gate device (mounted on the same device
     # as the lock/camera entities).  Uses the same stable gate id as lock.py.
     try:
-        gates = await client.get_gates()
+        gates = await client.ensure_gates()
         _LOGGER.info("Found %d gates for sensors", len(gates))
     except Exception as err:  # noqa: BLE001 - gate list is best-effort
         _LOGGER.error("Failed to get gates for sensors: %s", err)

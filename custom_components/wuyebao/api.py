@@ -87,6 +87,12 @@ class WuYeBaoClient:
         # refreshed periodically by the hub poller in __init__.py.
         self.hub_data: dict[str, Any] = {}
 
+        # Gate list cache: fetched once at setup (pre-warmed after login),
+        # shared by every platform so a transient API failure cannot leave
+        # some platforms with an empty door list while others succeed.
+        self.gates: list[dict[str, Any]] | None = None
+        self._gates_lock = asyncio.Lock()
+
     @property
     def access_token(self) -> str | None:
         """Return access token."""
@@ -284,16 +290,59 @@ class WuYeBaoClient:
         HA.  Each gate object carries its own community/building/unit fields,
         so per-gate naming stays correct.  Existing entities are keyed by the
         stable gate id, so reloading never drops doors.
-        """
-        params = {}
-        if self.community_id:
-            params["communityId"] = self.community_id
 
-        data = await self._request("GET", API_GATES, token=self._access_token, params=params)
-        raw = data.get("data", data)
-        if isinstance(raw, list):
-            return raw
-        return []
+        The result is cached on ``self.gates`` (guarded by a lock) and
+        retried a few times so a transient API hiccup during parallel
+        platform setup cannot leave some platforms with an empty door list.
+        """
+        if self.gates is not None:
+            return self.gates
+
+        async with self._gates_lock:
+            # Double-checked: another platform may have filled the cache
+            # while we were waiting for the lock.
+            if self.gates is not None:
+                return self.gates
+
+            last_err: Exception | None = None
+            for attempt in range(4):
+                try:
+                    params = {}
+                    if self.community_id:
+                        params["communityId"] = self.community_id
+
+                    data = await self._request(
+                        "GET", API_GATES, token=self._access_token, params=params
+                    )
+                    raw = data.get("data", data)
+                    if isinstance(raw, list):
+                        self.gates = raw
+                        _LOGGER.info("Cached %d gates (attempt %d)", len(raw), attempt + 1)
+                        return raw
+                    # Non-list payload (e.g. empty/odd shape): treat as empty
+                    # but retry - the API may need a moment after login.
+                    last_err = WuYeBaoApiError(
+                        f"Unexpected gate list shape: {type(raw).__name__}"
+                    )
+                    _LOGGER.warning(
+                        "Gate list attempt %d returned non-list payload: %s",
+                        attempt + 1,
+                        str(raw)[:160],
+                    )
+                except Exception as err:  # noqa: BLE001 - retry transient errors
+                    last_err = err
+                    _LOGGER.warning("Gate list attempt %d failed: %s", attempt + 1, err)
+                if attempt < 3:
+                    await asyncio.sleep(2.0 * (attempt + 1))
+
+            _LOGGER.error("Failed to fetch gate list after retries: %s", last_err)
+            return []
+
+    async def ensure_gates(self) -> list[dict[str, Any]]:
+        """Return the cached gate list (fetching it if necessary)."""
+        if self.gates is not None:
+            return self.gates
+        return await self.get_gates()
 
     async def get_owners(self) -> list[dict[str, Any]]:
         """Get owner info (contains bindingCode for camera calls)."""

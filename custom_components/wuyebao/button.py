@@ -25,7 +25,7 @@ async def async_setup_entry(
     client: WuYeBaoClient = hass.data[DOMAIN][entry.entry_id]
 
     try:
-        gates = await client.get_gates()
+        gates = await client.ensure_gates()
     except Exception as err:
         _LOGGER.error("Failed to get gates for buttons: %s", err)
         gates = []

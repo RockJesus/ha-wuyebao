@@ -32,7 +32,7 @@ async def async_setup_entry(
     client: WuYeBaoClient = hass.data[DOMAIN][entry.entry_id]
 
     try:
-        gates = await client.get_gates()
+        gates = await client.ensure_gates()
         _LOGGER.info("Found %d gates for switches", len(gates))
     except Exception as err:  # noqa: BLE001 - gate list is best-effort
         _LOGGER.error("Failed to get gates for switches: %s", err)
