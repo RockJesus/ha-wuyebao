@@ -592,18 +592,14 @@ class WuYeBaoClient:
         return raw if isinstance(raw, dict) else None
 
     async def get_face_info(self, user_id: str | None = None) -> dict[str, Any] | None:
-        """Get 人脸信息 for a user (defaults to the current owner's user).
+        """Get 人脸信息 for a user (defaults to the current owner).
 
-        The face API keyed by ``userId`` (a per-owner user account id), which
-        differs from ``owner_id``.  Resolve it from the owners list fetched at
-        login; fall back to ``self.user_id`` if not found.
+        HAR evidence: the faceinfo endpoint keys by a ``userId`` value that
+        equals the owner's ``id`` from ``/api/owner/anon/owners/community``
+        (e.g. owner id 1061966055548784640 == faceinfo userId).  Fall back to
+        ``self.user_id`` only as a last resort.
         """
-        uid = user_id
-        if not uid and self.owners:
-            for o in self.owners:
-                if str(o.get("id", "")) == str(self.owner_id) and o.get("userId"):
-                    uid = str(o.get("userId"))
-                    break
+        uid = user_id or self.owner_id
         if not uid:
             uid = self.user_id
         if not uid:
