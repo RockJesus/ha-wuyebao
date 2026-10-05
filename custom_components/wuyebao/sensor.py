@@ -374,7 +374,7 @@ class WuYeBaoVisitorSensor(_WuYeBaoHubSensor):
 
 
 class WuYeBaoFaceSensor(_WuYeBaoHubSensor):
-    """人脸信息 sensor (primary value = latest face photo URL)."""
+    """人脸信息 sensor (primary = description, picture via entity_picture/image attrs)."""
 
     _attr_name = "人脸信息"
     _attr_icon = "mdi:face-recognition"
@@ -388,8 +388,8 @@ class WuYeBaoFaceSensor(_WuYeBaoHubSensor):
             return None
         faces = data.get("faces") or []
         if not faces:
-            return None
-        return faces[0].get("image")
+            return "无"
+        return f"最近人脸（{len(faces)}）"
 
     def _attrs_from(self, data: Any) -> dict[str, Any]:
         if not isinstance(data, dict):
@@ -413,6 +413,7 @@ class WuYeBaoFaceSensor(_WuYeBaoHubSensor):
         }
         if images:
             attrs["image"] = images[0]
+            attrs["entity_picture"] = images[0]
         return attrs
 
 
@@ -478,7 +479,7 @@ class WuYeBaoAlarmSensor(_WuYeBaoHubSensor):
 
 
 class WuYeBaoCallsSensor(_WuYeBaoHubSensor):
-    """呼叫记录 sensor (recent community call records count + details)."""
+    """呼叫记录 sensor (primary = latest call description, picture via entity_picture)."""
 
     _attr_name = "呼叫记录"
     _attr_icon = "mdi:phone-log"
@@ -488,7 +489,15 @@ class WuYeBaoCallsSensor(_WuYeBaoHubSensor):
         super().__init__(client, entry_id, "call_records")
 
     def _value_from(self, data: Any) -> Any:
-        return len(data) if isinstance(data, list) else None
+        if not isinstance(data, list) or not data:
+            return "无呼叫记录"
+        import time as _time
+
+        ts = data[0].get("time")
+        if isinstance(ts, (int, float)):
+            ts_fmt = _time.strftime("%m-%d %H:%M", _time.localtime(int(ts)))
+            return f"最近呼叫 {ts_fmt}"
+        return "最近呼叫"
 
     def _attrs_from(self, data: Any) -> dict[str, Any]:
         if not isinstance(data, list) or not data:
@@ -514,4 +523,9 @@ class WuYeBaoCallsSensor(_WuYeBaoHubSensor):
                     "state": c.get("state"),
                 }
             )
-        return {"count": len(data), "items": items}
+        attrs: dict[str, Any] = {"count": len(data), "items": items}
+        img = data[0].get("imageUrl")
+        if img:
+            attrs["image"] = img
+            attrs["entity_picture"] = img
+        return attrs
