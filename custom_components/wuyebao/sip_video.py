@@ -236,6 +236,20 @@ class SipMonitorCall:
         # RTP-over-TCP subscribers: (loop, writer, channel) (interleaved)
         self._tcp_subscribers: list[tuple[object, object, int]] = []
 
+        # Debug trace of the last monitor attempt (exposed on the live
+        # camera entity as `sip_debug` so failures can be diagnosed from
+        # HA without log-level access).
+        self.debug_events: list[str] = []
+        self.last_debug: str = ""
+
+    def _dbg(self, ev: str) -> None:
+        self.debug_events.append(f"{time.time():.1f} {ev}")
+        if len(self.debug_events) > 60:
+            self.debug_events = self.debug_events[-60:]
+
+    def _snap_debug(self) -> None:
+        self.last_debug = " | ".join(self.debug_events[-40:])
+
     @staticmethod
     def _discover_local_ip() -> str:
         try:
@@ -626,6 +640,8 @@ class SipMonitorCall:
                 self._video_received = True
                 self._video_packet_count = getattr(self, "_video_packet_count", 0) + 1
                 self.last_rtp_time = time.time()
+                if self._video_packet_count == 1:
+                    self._dbg(f"first video RTP from {addr} len={len(data)}")
                 # Track the stream's SSRC/timestamp/sequence so injected
                 # parameter-set packets look like part of the media stream.
                 self._stream_ssrc = int.from_bytes(data[8:12], "big")
@@ -843,12 +859,15 @@ class SipMonitorCall:
                     return {"ok": False, "status": 0, "error": f"bind rtp: {err}"}
 
         code, reason, raw = self._invite()
+        self._dbg(f"INVITE sent -> code={code} reason={reason}")
         if code not in (100, 180, 183):
             # log the full reply for 486/4xx diagnostics (Retry-After etc.)
+            self._dbg(f"INVITE not accepted: {code} {reason}")
             _LOGGER.warning(
                 "INVITE %s not accepted: code=%s reason=%s reply=%s",
                 self.gt_uri, code, reason, raw[:400],
             )
+            self._snap_debug()
             self._cleanup_after_fail()
             return {"ok": False, "status": code, "error": f"INVITE {reason}"}
 
@@ -898,6 +917,7 @@ class SipMonitorCall:
                     if final_code >= 200 and not acked:
                         body = msg.partition("\r\n\r\n")[2]
                         if "m=video" in body or "m=audio" in body:
+                            self._dbg(f"resp {final_code} OK with SDP (len={len(body)}) tag={self._remote_tag}")
                             sdp = body
                             # 200 OK answered: any early-media packets seen
                             # before this point were ringtone - restart the
@@ -913,6 +933,7 @@ class SipMonitorCall:
                         if sdp:
                             # 183 already supplied the answer SDP; the final
                             # 200 OK without a body is normal - ACK it.
+                            self._dbg(f"resp {final_code} OK no-body (183 SDP kept) tag={self._remote_tag}")
                             for line in msg.split("\r\n"):
                                 if line.lower().startswith("t:") and ";tag=" in line:
                                     self._remote_tag = line.split(";tag=")[1].strip().rstrip("\r")
@@ -925,6 +946,7 @@ class SipMonitorCall:
                         continue
                     # 183/180: take the SDP and ACK early media right away
                     if final_code in (180, 183) and not acked:
+                        self._dbg(f"resp {final_code} early-media with SDP (len={len(body)}) tag={self._remote_tag}")
                         body = msg.partition("\r\n\r\n")[2]
                         if "m=video" in body or "m=audio" in body:
                             sdp = body
@@ -938,6 +960,7 @@ class SipMonitorCall:
                 elif up.startswith("INFO "):
                     # device INFO (picture_fast_update): answer 200 OK so the
                     # device proceeds to stream media (the app does the same)
+                    self._dbg("INFO from device (answered 200)")
                     self._reply_200_to_info(msg)
                 # extract remote tag + Contact (m:) from any response
                 for line in msg.split("\r\n"):
@@ -950,6 +973,8 @@ class SipMonitorCall:
             break  # got the answer SDP
 
         if not acked and final_code not in (183, 200):
+            self._dbg(f"no usable answer (final={final_code})")
+            self._snap_debug()
             self._cleanup_after_fail()
             return {"ok": False, "status": final_code, "error": f"INVITE {final_code}"}
 
@@ -1053,6 +1078,7 @@ class SipMonitorCall:
                 # north/unit gates (whose 200 OK arrives 3-8s late)
                 # answered INVITE but never streamed.  A duplicate ACK
                 # is harmless; a missing one is fatal.
+                self._dbg(f"ACK sent on final 200 (tag={self._remote_tag})")
                 self._acked = True
                 self._ack()
 
@@ -1066,8 +1092,11 @@ class SipMonitorCall:
         # then punch a hole from the offer port so it can send RTP back.
         # (may already have been sent right after answering the device INFO)
         if not self._acked:
+            self._dbg(f"ACK sent after final window (code={final_code} tag={self._remote_tag})")
             self._acked = True
             self._ack()
+        else:
+            self._dbg(f"already ACKed, skip (code={final_code})")
         acked = True
         self._hole_punch()
 
@@ -1103,10 +1132,12 @@ class SipMonitorCall:
             (time.time() - last_pkt) <= 3.0 or count >= min_packets * 4
         )
         if not sustained:
+            self._dbg(f"confirm window end: pkts={count} last_pkt_age={time.time()-last_pkt:.1f}s -> FAIL")
             try:
                 self._bye()
             except Exception:
                 pass
+            self._snap_debug()
             self._cleanup_after_fail()
             return {
                 "ok": False,
@@ -1114,6 +1145,8 @@ class SipMonitorCall:
                 "error": f"answered but no sustained video ({count} pkts)",
             }
 
+        self._dbg(f"confirm window end: pkts={count} -> OK")
+        self._snap_debug()
         _LOGGER.info("Monitor call active: %s", self.gt_uri)
         return {
             "ok": True,
