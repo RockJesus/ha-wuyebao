@@ -1045,12 +1045,22 @@ class SipMonitorCall:
                         self.media_video_rtcp = new_info.get("video_rtcp")
                         self.media_audio_rtcp = new_info.get("audio_rtcp")
                         self._hole_punch()
-                if not self._acked:
-                    self._acked = True
-                    self._ack()
+                # ALWAYS ACK the final 200 OK, even if we already ACKed
+                # the 183 provisional earlier.  v6.6.3 waited for the 200
+                # and ACKed it (effective - FreeSWITCH activates media on
+                # the final-response ACK); v6.7.x ACKed the 183 early and
+                # then skipped the 200 ACK, which FreeSWITCH ignores, so
+                # north/unit gates (whose 200 OK arrives 3-8s late)
+                # answered INVITE but never streamed.  A duplicate ACK
+                # is harmless; a missing one is fatal.
+                self._acked = True
+                self._ack()
 
         if final_code in (180, 183):
-            _drain_and_answer(3.0)
+            # Give the final 200 OK up to 10s to arrive after the 183 early
+            # media (north/unit gates take 3-8s to send it); when it does we
+            # ACK it (final-response ACK activates the media session).
+            _drain_and_answer(10.0)
 
         # ACK first - FreeSWITCH activates the media session on ACK,
         # then punch a hole from the offer port so it can send RTP back.
