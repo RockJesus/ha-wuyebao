@@ -168,7 +168,9 @@ class VideoSessionManager:
                 self._sessions[gate_id] = call
                 return call
             _LOGGER.warning(
-                "No video media for %s, tearing down and retrying", gate_id
+                "No video media for %s, tearing down and retrying | %s",
+                gate_id,
+                getattr(call, "last_debug", "") or "no-debug",
             )
             await asyncio.to_thread(call.stop)
             if attempt < 4:
@@ -266,8 +268,9 @@ class VideoSessionManager:
                 sess = self._sessions.pop(gid, None)
                 if sess is not None:
                     _LOGGER.warning(
-                        "Monitor stream %s silent for %.0fs (media=%s) - rebuilding session",
+                        "Monitor stream %s silent for %.0fs (media=%s) - rebuilding session | %s",
                         gid, threshold, sess.has_media(),
+                        getattr(sess, "last_debug", "") or "no-debug",
                     )
                     task = asyncio.ensure_future(self._restart(gid))
                     self._restart_tasks.add(task)
