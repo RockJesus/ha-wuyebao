@@ -52,6 +52,7 @@ async def async_setup_entry(
         WuYeBaoFaceSensor(client, entry.entry_id),
         WuYeBaoNoticeSensor(client, entry.entry_id),
         WuYeBaoAlarmSensor(client, entry.entry_id),
+        WuYeBaoCallsSensor(client, entry.entry_id),
     ]
 
     # One stream-address sensor per gate device (mounted on the same device
@@ -290,9 +291,13 @@ class WuYeBaoRepairSensor(_WuYeBaoHubSensor):
 
 
 class WuYeBaoVisitorSensor(_WuYeBaoHubSensor):
-    """访客邀请 sensor (active visitor codes)."""
+    """访客开门码 sensor (active visitor codes).
 
-    _attr_name = "访客邀请"
+    Primary value = the password of the newest valid visitor code; attributes
+    carry the formatted start/end window plus validity for each code.
+    """
+
+    _attr_name = "访客开门码"
     _attr_icon = "mdi:account-key"
 
     def __init__(self, client: WuYeBaoClient, entry_id: str) -> None:
@@ -300,11 +305,29 @@ class WuYeBaoVisitorSensor(_WuYeBaoHubSensor):
         super().__init__(client, entry_id, "visitors")
 
     def _value_from(self, data: Any) -> Any:
-        return len(data) if isinstance(data, list) else None
+        if not isinstance(data, list) or not data:
+            return None
+        import time as _time
+
+        now_ms = int(_time.time() * 1000)
+        newest_valid = None
+        newest_any = None
+        for v in data:
+            start = v.get("startTime") or v.get("start_time")
+            end = v.get("endTime") or v.get("end_time")
+            pwd = v.get("password")
+            if newest_any is None:
+                newest_any = pwd
+            try:
+                if pwd and int(start) <= now_ms <= int(end):
+                    newest_valid = pwd
+            except (TypeError, ValueError):
+                pass
+        return newest_valid or newest_any
 
     def _attrs_from(self, data: Any) -> dict[str, Any]:
         if not isinstance(data, list) or not data:
-            return {"count": 0, "codes": []}
+            return {"count": 0, "active": 0, "codes": []}
         import time as _time
 
         now_ms = int(_time.time() * 1000)
@@ -313,26 +336,45 @@ class WuYeBaoVisitorSensor(_WuYeBaoHubSensor):
             start = v.get("startTime") or v.get("start_time")
             end = v.get("endTime") or v.get("end_time")
             valid = None
+            start_fmt = end_fmt = None
             if isinstance(start, (int, str)) and isinstance(end, (int, str)):
                 try:
-                    valid = int(start) <= now_ms <= int(end)
+                    s = int(start)
+                    e = int(end)
+                    valid = s <= now_ms <= e
+                    start_fmt = _time.strftime(
+                        "%Y-%m-%d %H:%M", _time.localtime(s / 1000)
+                    )
+                    end_fmt = _time.strftime(
+                        "%Y-%m-%d %H:%M", _time.localtime(e / 1000)
+                    )
                 except (TypeError, ValueError):
                     valid = None
             codes.append(
                 {
                     "id": v.get("id"),
                     "password": v.get("password"),
-                    "start_time": start,
-                    "end_time": end,
+                    "start_time": start_fmt,
+                    "end_time": end_fmt,
+                    "start_time_ms": start,
+                    "end_time_ms": end,
                     "valid": valid,
                 }
             )
         active = [c for c in codes if c.get("valid") is True]
-        return {"count": len(data), "active": len(active), "codes": codes}
+        return {
+            "count": len(data),
+            "active": len(active),
+            "password": codes[0].get("password"),
+            "valid": codes[0].get("valid"),
+            "start_time": codes[0].get("start_time"),
+            "end_time": codes[0].get("end_time"),
+            "codes": codes,
+        }
 
 
 class WuYeBaoFaceSensor(_WuYeBaoHubSensor):
-    """人脸信息 sensor (registered faces + granted door auths)."""
+    """人脸信息 sensor (primary value = latest face photo URL)."""
 
     _attr_name = "人脸信息"
     _attr_icon = "mdi:face-recognition"
@@ -344,17 +386,21 @@ class WuYeBaoFaceSensor(_WuYeBaoHubSensor):
     def _value_from(self, data: Any) -> Any:
         if not isinstance(data, dict):
             return None
-        return len(data.get("faces") or [])
+        faces = data.get("faces") or []
+        if not faces:
+            return None
+        return faces[0].get("image")
 
     def _attrs_from(self, data: Any) -> dict[str, Any]:
         if not isinstance(data, dict):
             return {}
         faces = data.get("faces") or []
         auths = data.get("faceAuths") or []
-        return {
+        images = [f.get("image") for f in faces[:10] if f.get("image")]
+        attrs: dict[str, Any] = {
             "faces": len(faces),
             "face_valid_time": data.get("faceValidTime"),
-            "face_images": [f.get("image") for f in faces[:10]],
+            "face_images": images,
             "auth_gates": [
                 {
                     "community": a.get("communityName"),
@@ -365,6 +411,9 @@ class WuYeBaoFaceSensor(_WuYeBaoHubSensor):
                 for a in auths[:10]
             ],
         }
+        if images:
+            attrs["image"] = images[0]
+        return attrs
 
 
 class WuYeBaoNoticeSensor(_WuYeBaoHubSensor):
@@ -426,3 +475,43 @@ class WuYeBaoAlarmSensor(_WuYeBaoHubSensor):
                 }
             )
         return {"count": len(data), "latest": latest}
+
+
+class WuYeBaoCallsSensor(_WuYeBaoHubSensor):
+    """呼叫记录 sensor (recent community call records count + details)."""
+
+    _attr_name = "呼叫记录"
+    _attr_icon = "mdi:phone-log"
+
+    def __init__(self, client: WuYeBaoClient, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(client, entry_id, "call_records")
+
+    def _value_from(self, data: Any) -> Any:
+        return len(data) if isinstance(data, list) else None
+
+    def _attrs_from(self, data: Any) -> dict[str, Any]:
+        if not isinstance(data, list) or not data:
+            return {"count": 0, "items": []}
+        import time as _time
+
+        items = []
+        for c in data[:20]:
+            ts = c.get("time")
+            ts_fmt = None
+            if isinstance(ts, (int, float)):
+                ts_fmt = _time.strftime(
+                    "%Y-%m-%d %H:%M:%S", _time.localtime(int(ts))
+                )
+            items.append(
+                {
+                    "time": ts_fmt,
+                    "time_unix": ts,
+                    "device": c.get("accessInfo") or c.get("deviceNumber"),
+                    "call_number": c.get("callNumber"),
+                    "type": c.get("devicesType"),
+                    "image": c.get("imageUrl"),
+                    "state": c.get("state"),
+                }
+            )
+        return {"count": len(data), "items": items}
