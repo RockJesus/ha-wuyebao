@@ -268,6 +268,8 @@ class WuYeBaoClient:
                 self.community_name = owner.get("communityName", "")
                 self.community_code = owner.get("communityCode")
                 self.owner_id = str(owner.get("id", ""))
+                if owner.get("userId"):
+                    self.user_id = str(owner.get("userId"))
             return raw
         return []
 
