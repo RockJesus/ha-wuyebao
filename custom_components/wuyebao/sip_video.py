@@ -716,6 +716,16 @@ class SipMonitorCall:
         with self._lock:
             return len(self._subscribers) + len(self._tcp_subscribers)
 
+    def has_media(self) -> bool:
+        """True if at least one video RTP packet has ever arrived.
+
+        Used to distinguish a session that is still waiting for the gate
+        device's first media (unit doors answer INVITE but can take
+        10-30s before they push RTP) from a session that delivered media
+        and then went silent (frozen picture that the watchdog must
+        rebuild)."""
+        return self.last_rtp_time > 0
+
     def is_stream_alive(self, silence_threshold: float) -> bool:
         """True while video RTP is still arriving.
 
