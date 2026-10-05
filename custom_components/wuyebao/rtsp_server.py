@@ -750,16 +750,20 @@ class RtspClientConnection:
             "a=rtpmap:97 H264/90000",
         ]
         sps, pps = sess.get_sps_pps()
-        # Always advertise packetization-mode=1 so ffmpeg/PyAV parses
-        # FU-A fragments correctly, even if SPS/PPS have not arrived yet.
+        # Advertise packetization-mode=1 plus sprop-parameter-sets.  The
+        # SPS/PPS are extracted from this session's own RTP stream
+        # (in-band bare NALs preferred, STAP-A as fallback), so the IDs
+        # match what the stream references.  Pre-setting them lets ffmpeg
+        # decode immediately even if it connects after the stream's first
+        # parameter sets have already passed.
         fmtp = "a=fmtp:97 packetization-mode=1"
         if sps and len(sps) > 4:
-            # profile-level-id is stable per codec level; omit
-            # sprop-parameter-sets on purpose: the cached SPS/PPS can come
-            # from a different call/session and referencing the wrong IDs
-            # makes ffmpeg fail with "non-existing PPS xx referenced".
-            # ffmpeg extracts parameter sets from the RTP stream itself.
             fmtp += f";profile-level-id={sps[1:4].hex()}"
+            if pps and len(pps) > 3:
+                fmtp += (
+                    f";sprop-parameter-sets={base64.b64encode(sps).decode()},"
+                    f"{base64.b64encode(pps).decode()}"
+                )
         lines.append(fmtp)
         lines.append("a=control:track1")
         return "\r\n".join(lines) + "\r\n"
