@@ -20,7 +20,13 @@ _LOGGER = logging.getLogger(__name__)
 
 RTSP_HOST = "0.0.0.0"
 RTSP_PORT = 8556
-IDLE_STOP_AFTER = 30  # seconds without RTSP clients -> BYE
+# How long a session with no RTSP clients is kept alive.  Long on purpose:
+# for unit doors the first client connection acts as a warm-up - the SIP
+# call can take 30-60s to produce video, so the client's first DESCRIBE
+# may time out and reconnect.  Keeping the session for 2 minutes lets the
+# reconnect reuse the now-established call and show video immediately
+# instead of restarting the whole INVITE dance from scratch.
+IDLE_STOP_AFTER = 120  # seconds without RTSP clients -> BYE
 
 
 class VideoSessionManager:
@@ -79,9 +85,9 @@ class VideoSessionManager:
         # Outer retry backoff (seconds).  Short enough that an RTSP client
         # (go2rtc / HA player) keeps waiting instead of disconnecting and
         # reconnecting in a loop; the inner SipMonitorCall.start() already
-        # retries the INVITE 6x quickly for the "busy then answers on the
+        # retries the INVITE 8x quickly for the "busy then answers on the
         # last attempt" behaviour of the official app.
-        backoffs = (4, 6, 10, 15)
+        backoffs = (3, 5, 8, 12)
         for attempt in range(5):
             call = SipMonitorCall(
                 user=client.username,
@@ -106,7 +112,7 @@ class VideoSessionManager:
             # wait for actual video RTP (SPS/PPS); retry on failure.
             # North gate / some devices take >10s to stream media after
             # the 200 OK, so wait longer than the old 10s.
-            got_video = await asyncio.to_thread(call.wait_for_video, 20.0)
+            got_video = await asyncio.to_thread(call.wait_for_video, 25.0)
             if got_video:
                 self._sessions[gate_id] = call
                 return call
@@ -448,17 +454,34 @@ class RtspClientConnection:
 
         if method == "DESCRIBE":
             self._gate_id = gate_id
-            sess = await self._manager.get_or_start(gate_id)
-            if sess is None:
+            if self._manager.get_gate(gate_id) is None:
                 await self._send("404 Not Found", {"CSeq": cseq})
                 return True
+            # Bounded wait: for unit doors establishing the SIP call can take
+            # 30-60s, longer than most RTSP clients wait for DESCRIBE.  We
+            # give the session 25s here; if it is not ready, still answer 200
+            # with the (possibly empty) SDP so the client proceeds to
+            # SETUP/PLAY - the session keeps building in the background (the
+            # task is shielded so the timeout does NOT cancel it) and the
+            # client's automatic reconnect (go2rtc/ffmpeg) will find it
+            # already established (IDLE_STOP_AFTER keeps it alive).
+            task = asyncio.ensure_future(self._manager.get_or_start(gate_id))
+            try:
+                sess = await asyncio.wait_for(asyncio.shield(task), 25.0)
+            except asyncio.TimeoutError:
+                sess = None
+                _LOGGER.warning(
+                    "DESCRIBE %s: session still starting, answering empty SDP",
+                    gate_id,
+                )
             # briefly wait for SPS/PPS so the SDP can carry
             # sprop-parameter-sets (better ffmpeg/go2rtc compatibility)
-            for _ in range(15):
-                if sess.get_sps_pps()[0] is not None:
-                    break
-                await asyncio.sleep(0.2)
-            sdp = self._build_sdp(sess)
+            if sess is not None:
+                for _ in range(15):
+                    if sess.get_sps_pps()[0] is not None:
+                        break
+                    await asyncio.sleep(0.2)
+            sdp = self._build_sdp(sess) if sess is not None else self._empty_sdp()
             await self._send(
                 "200 OK",
                 {"CSeq": cseq, "Content-Type": "application/sdp", "Content-Base": uri},
@@ -538,6 +561,27 @@ class RtspClientConnection:
                     "RTP-Info": f"url=rtsp://127.0.0.1:8556/{self._gate_id}/track1",
                 },
             )
+            # If the SIP session is still being established (DESCRIBE may
+            # have answered early with an empty SDP), wait up to 25s for it
+            # before subscribing.  Slow unit doors can take this long after
+            # the 200 OK to push video; the bounded wait (shielded - the
+            # establishment continues in the background if we time out) plus
+            # the client's reconnect keeps the flow alive.
+            sess = self._manager.get_session(self._gate_id)
+            if sess is None:
+                task = asyncio.ensure_future(
+                    self._manager.get_or_start(self._gate_id)
+                )
+                try:
+                    sess = await asyncio.wait_for(asyncio.shield(task), 25.0)
+                except asyncio.TimeoutError:
+                    sess = None
+                if sess is None:
+                    _LOGGER.warning(
+                        "PLAY %s: session not established after 25s", self._gate_id
+                    )
+                    await self._send("454 Session Not Found", {"CSeq": cseq})
+                    return True
             if self._tcp_transport:
                 self._manager.add_tcp_subscriber(
                     self._gate_id, self._loop, self._writer, self._channel
@@ -547,17 +591,15 @@ class RtspClientConnection:
                 # ~1.2s, so a client joining mid-call would otherwise see
                 # "non-existing PPS" on its first frame and PyAV/HA stream
                 # would abort instead of recovering.
-                sess = self._manager.get_session(self._gate_id)
-                if sess is not None:
-                    for pkt in sess.build_paramset_packets():
-                        frame = (
-                            b"$"
-                            + bytes([self._channel])
-                            + len(pkt).to_bytes(2, "big")
-                            + pkt
-                        )
-                        self._writer.write(frame)
-                    await self._writer.drain()
+                for pkt in sess.build_paramset_packets():
+                    frame = (
+                        b"$"
+                        + bytes([self._channel])
+                        + len(pkt).to_bytes(2, "big")
+                        + pkt
+                    )
+                    self._writer.write(frame)
+                await self._writer.drain()
             elif self._rtp_sock is not None and self._client_rtp_port is not None:
                 peer = self._writer.get_extra_info("peername")
                 client_ip = peer[0] if peer else "127.0.0.1"
@@ -602,6 +644,20 @@ class RtspClientConnection:
         lines.append(fmtp)
         lines.append("a=control:track1")
         return "\r\n".join(lines) + "\r\n"
+
+    def _empty_sdp(self) -> str:
+        """Minimal SDP for a session that is still establishing."""
+        return "\r\n".join([
+            "v=0",
+            "o=- 1 1 IN IP4 127.0.0.1",
+            "s=WuYeBao Live",
+            "t=0 0",
+            "m=video 0 RTP/AVP 97",
+            "c=IN IP4 127.0.0.1",
+            "a=rtpmap:97 H264/90000",
+            "a=fmtp:97 packetization-mode=1",
+            "a=control:track1",
+        ]) + "\r\n"
 
     async def _teardown(self) -> None:
         if self._tcp_transport:
