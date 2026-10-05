@@ -40,14 +40,14 @@ async def async_setup_entry(
 
     # Create camera entities for wall gates and unit doors (they have cameras)
     entities: list[Camera] = []
+    manager = hass.data[DOMAIN].get("video_manager")
     for gate in gates:
         gate_type = gate.get("type", "")
         if gate_type in ("wall", "outdoor"):
             entities.append(WuYeBaoCamera(client, entry.entry_id, gate))
-            entities.append(WuYeBaoLiveCamera(client, entry.entry_id, gate))
+            entities.append(WuYeBaoLiveCamera(client, entry.entry_id, gate, manager))
             # Register gate with the live-video manager so RTSP clients
             # can start a SIP monitor call for this device.
-            manager = hass.data[DOMAIN].get("video_manager")
             if manager is not None:
                 manager.register_gate(_gate_id(gate), gate, client)
 
@@ -186,6 +186,7 @@ class WuYeBaoLiveCamera(Camera):
         client: WuYeBaoClient,
         entry_id: str,
         gate: dict[str, Any],
+        manager: Any = None,
     ) -> None:
         """Initialize the live camera."""
         super().__init__()
@@ -193,6 +194,7 @@ class WuYeBaoLiveCamera(Camera):
         self._gate = gate
         self._entry_id = entry_id
         self._gid = _gate_id(gate)
+        self._manager = manager
 
         self._attr_unique_id = f"{entry_id}_live_camera_{self._gid}"
         self._attr_device_info = self._build_device_info(gate)
@@ -211,10 +213,16 @@ class WuYeBaoLiveCamera(Camera):
     def extra_state_attributes(self) -> dict[str, Any]:
         """RTSP URL exposed here since the standalone 流地址 sensor was
         removed in v6.6.8 (go2rtc / ffmpeg users copy it from attributes)."""
+        debug = ""
+        if self._manager is not None:
+            sess = self._manager.get_session(self._gid)
+            if sess is not None:
+                debug = getattr(sess, "last_debug", "") or ""
         return {
             "gate_id": self._gid,
             "rtsp_url": f"rtsp://127.0.0.1:8556/{self._gid}",
             "device_number": self._gate.get("deviceNumber", ""),
+            "sip_debug": debug,
         }
 
     @property
