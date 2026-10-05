@@ -979,8 +979,8 @@ class SipMonitorCall:
                         continue
                     # 183/180: take the SDP and ACK early media right away
                     if final_code in (180, 183) and not acked:
-                        self._dbg(f"resp {final_code} early-media with SDP (len={len(body)}) tag={self._remote_tag}")
                         body = msg.partition("\r\n\r\n")[2]
+                        self._dbg(f"resp {final_code} early-media with SDP (len={len(body)}) tag={self._remote_tag}")
                         if "m=video" in body or "m=audio" in body:
                             sdp = body
                             for line in msg.split("\r\n"):
