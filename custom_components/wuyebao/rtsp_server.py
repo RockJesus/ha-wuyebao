@@ -33,6 +33,7 @@ class VideoSessionManager:
         self._lock = asyncio.Lock()
         self._watchdog_task: asyncio.Task | None = None
         self._restarting: set[str] = set()
+        self._restart_tasks: set[asyncio.Task] = set()
 
     def register_gate(self, gate_id: str, gate: dict, client) -> None:
         self._gates[gate_id] = {"gate": gate, "client": client}
@@ -134,13 +135,24 @@ class VideoSessionManager:
         )
 
     async def stop_watchdog(self) -> None:
+        """Stop the watchdog and cancel pending restart tasks.
+
+        Must never block for long: unload waits on this and a stuck
+        restart (long SIP INVITE retries holding the lock) would otherwise
+        hang the whole integration removal.
+        """
         if self._watchdog_task is not None:
             self._watchdog_task.cancel()
             try:
-                await self._watchdog_task
-            except (asyncio.CancelledError, Exception):
+                await asyncio.wait_for(self._watchdog_task, 2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception:
                 pass
             self._watchdog_task = None
+        for t in list(self._restart_tasks):
+            t.cancel()
+        self._restart_tasks.clear()
 
     async def _watchdog_loop(self) -> None:
         try:
@@ -171,13 +183,16 @@ class VideoSessionManager:
                         "Monitor stream %s silent for %.0fs - rebuilding session",
                         gid, self.SILENCE_THRESHOLD,
                     )
-                    asyncio.ensure_future(self._restart(gid))
+                    task = asyncio.ensure_future(self._restart(gid))
+                    self._restart_tasks.add(task)
+                    task.add_done_callback(self._restart_tasks.discard)
         # keep the set from growing unbounded across many rebuilds
         if len(self._restarting) > 64:
             self._restarting.clear()
 
     async def _restart(self, gate_id: str) -> None:
         """Rebuild a stalled session (runs outside the lock)."""
+        task = asyncio.current_task()
         try:
             async with self._lock:
                 sess = self._sessions.get(gate_id)
@@ -187,6 +202,8 @@ class VideoSessionManager:
                 await self._start_locked(gate_id)
         finally:
             self._restarting.discard(gate_id)
+            if task is not None:
+                self._restart_tasks.discard(task)
 
     def add_subscriber(self, gate_id: str, s: socket.socket, target: tuple) -> bool:
         sess = self._sessions.get(gate_id)
@@ -237,13 +254,28 @@ class VideoSessionManager:
         await asyncio.to_thread(sess.stop)
 
     async def shutdown(self) -> None:
+        """Tear down all sessions. Never blocks the config-entry unload:
+        lock acquisition and each session stop are bounded by timeouts.
+        """
         await self.stop_watchdog()
-        async with self._lock:
-            sessions = list(self._sessions.values())
-            self._sessions.clear()
+        sessions: list = []
+        try:
+            await asyncio.wait_for(self._lock.acquire(), 3.0)
+        except asyncio.TimeoutError:
+            _LOGGER.warning(
+                "video manager lock busy during shutdown - forcing cleanup"
+            )
+        except Exception:
+            return
+        else:
+            try:
+                sessions = list(self._sessions.values())
+                self._sessions.clear()
+            finally:
+                self._lock.release()
         for sess in sessions:
             try:
-                await asyncio.to_thread(sess.stop)
+                await asyncio.wait_for(asyncio.to_thread(sess.stop), 15.0)
             except Exception:
                 pass
 
