@@ -317,12 +317,18 @@ class WuYeBaoClient:
     async def get_calls(
         self, page: int = 1, page_size: int = 20
     ) -> list[dict[str, Any]]:
-        """Get call records (contain door camera snapshot images)."""
+        """Get call records (contain door camera snapshot images).
+
+        IMPORTANT: we deliberately do NOT pass ``callNumber`` (the logged-in
+        user's binding code).  The API then returns call records for EVERY
+        door in the community, which lets us match each gate to its own
+        visitor snapshot.  Passing the binding code would only ever return
+        records from the user's own unit door, making every other gate show
+        that unit's picture (cross-gate image mix-up).
+        """
         params: dict[str, Any] = {}
         if self.community_id:
             params["communityId"] = self.community_id
-        if self.binding_code:
-            params["callNumber"] = self.binding_code
 
         path = API_CALLS.format(page=page, page_size=page_size)
         data = await self._request("GET", path, token=self._access_token, params=params)
@@ -345,6 +351,14 @@ class WuYeBaoClient:
 
         Call records are created when a visitor presses the doorbell, so
         the imageUrl is exactly the "last visitor snapshot" for that door.
+
+        Matching strategy (call records share ``deviceNumber`` - every unit
+        door is numbered "1" - so deviceNumber alone is NOT unique):
+          1. strong match by unitId  (unit doors: call.unitId == gate.unitId)
+          2. fallback by buildingId + deviceNumber
+             (call.buildingId == gate.buildingId and same deviceNumber)
+          3. final fallback by deviceNumber + devicesType ONLY for gates
+             without a unitId/buildingId (wall gates a/b are unique).
         Returns {"url", "time", "deviceNumber", "devicesType", "callType"}.
         """
         try:
@@ -358,15 +372,30 @@ class WuYeBaoClient:
 
         device_number = str(gate.get("deviceNumber", ""))
         gate_type = str(gate.get("type", ""))
+        gate_unit_id = str(gate.get("unitId", ""))
+        gate_building_id = str(gate.get("buildingId", ""))
 
-        for call in calls:
+        def _record_matches(call: dict[str, Any]) -> bool:
             call_dev = str(call.get("deviceNumber", ""))
             call_type = str(call.get("devicesType", ""))
-            if call_dev == device_number and call_type == gate_type:
+            if call_dev != device_number or call_type != gate_type:
+                return False
+            call_unit_id = str(call.get("unitId", ""))
+            call_building_id = str(call.get("buildingId", ""))
+            if gate_unit_id and call_unit_id:
+                # strongest: same unit door
+                return call_unit_id == gate_unit_id
+            if gate_building_id and call_building_id:
+                # unit doors without unitId match: same building + device no.
+                return call_building_id == gate_building_id
+            # wall gates (a/b) have no unit/building ids - deviceNumber is
+            # unique for them, keep the plain match
+            return True
+
+        for call in calls:
+            if _record_matches(call):
                 url = call.get("imageUrl")
                 if url:
-                    # the call records carry the timestamp under several
-                    # possible keys depending on the app version
                     ts = None
                     for key in ("createTime", "callTime", "time", "visitTime", "createDate"):
                         if call.get(key):
