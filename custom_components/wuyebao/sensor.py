@@ -47,6 +47,11 @@ async def async_setup_entry(
     entities = [
         WuYeBaoCommunitySensor(client, entry.entry_id),
         WuYeBaoUserSensor(client, entry.entry_id),
+        WuYeBaoRepairSensor(client, entry.entry_id),
+        WuYeBaoVisitorSensor(client, entry.entry_id),
+        WuYeBaoFaceSensor(client, entry.entry_id),
+        WuYeBaoNoticeSensor(client, entry.entry_id),
+        WuYeBaoAlarmSensor(client, entry.entry_id),
     ]
 
     # One stream-address sensor per gate device (mounted on the same device
@@ -215,3 +220,209 @@ class WuYeBaoGateStreamSensor(SensorEntity):
             "area_name": self._gate.get("areaName"),
             "community_name": self._gate.get("communityName"),
         }
+
+
+class _WuYeBaoHubSensor(SensorEntity):
+    """Base class for hub-level sensors (mounted on the 物业宝 主站 device).
+
+    Data is cached on the API client by the hub poller in __init__.py and
+    read here on every HA poll (default 30 s).
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:home"
+
+    def __init__(self, client: WuYeBaoClient, entry_id: str, key: str) -> None:
+        """Initialize the sensor."""
+        self._client = client
+        self._key = key
+        self._attr_unique_id = f"{entry_id}_{key}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{entry_id}_hub")},
+            name="物业宝 主站",
+            manufacturer="深圳家和云联",
+            model="物业宝 集成",
+        )
+        self._attr_native_value: Any = None
+        self._attr_extra_state_attributes: dict[str, Any] = {}
+
+    async def async_update(self) -> None:
+        """Refresh state from the client cache (fresh data is fetched by the
+        hub poller in __init__.py)."""
+        data = self._client.hub_data.get(self._key)
+        self._attr_native_value = self._value_from(data)
+        self._attr_extra_state_attributes = self._attrs_from(data)
+
+    def _value_from(self, data: Any) -> Any:
+        raise NotImplementedError
+
+    def _attrs_from(self, data: Any) -> dict[str, Any]:
+        return {}
+
+
+class WuYeBaoRepairSensor(_WuYeBaoHubSensor):
+    """报修工单 sensor (count of records + latest items)."""
+
+    _attr_name = "报修记录"
+    _attr_icon = "mdi:hammer-wrench"
+
+    def __init__(self, client: WuYeBaoClient, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(client, entry_id, "repairs")
+
+    def _value_from(self, data: Any) -> Any:
+        return len(data) if isinstance(data, list) else None
+
+    def _attrs_from(self, data: Any) -> dict[str, Any]:
+        if not isinstance(data, list) or not data:
+            return {"count": 0, "items": []}
+        items = []
+        for r in data[:10]:
+            items.append(
+                {
+                    "id": r.get("id"),
+                    "title": r.get("title") or r.get("content") or r.get("type") or "",
+                    "state": r.get("state"),
+                    "create_time": r.get("createTime"),
+                }
+            )
+        return {"count": len(data), "items": items}
+
+
+class WuYeBaoVisitorSensor(_WuYeBaoHubSensor):
+    """访客邀请 sensor (active visitor codes)."""
+
+    _attr_name = "访客邀请"
+    _attr_icon = "mdi:account-key"
+
+    def __init__(self, client: WuYeBaoClient, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(client, entry_id, "visitors")
+
+    def _value_from(self, data: Any) -> Any:
+        return len(data) if isinstance(data, list) else None
+
+    def _attrs_from(self, data: Any) -> dict[str, Any]:
+        if not isinstance(data, list) or not data:
+            return {"count": 0, "codes": []}
+        import time as _time
+
+        now_ms = int(_time.time() * 1000)
+        codes = []
+        for v in data[:10]:
+            start = v.get("startTime") or v.get("start_time")
+            end = v.get("endTime") or v.get("end_time")
+            valid = None
+            if isinstance(start, (int, str)) and isinstance(end, (int, str)):
+                try:
+                    valid = int(start) <= now_ms <= int(end)
+                except (TypeError, ValueError):
+                    valid = None
+            codes.append(
+                {
+                    "id": v.get("id"),
+                    "password": v.get("password"),
+                    "start_time": start,
+                    "end_time": end,
+                    "valid": valid,
+                }
+            )
+        active = [c for c in codes if c.get("valid") is True]
+        return {"count": len(data), "active": len(active), "codes": codes}
+
+
+class WuYeBaoFaceSensor(_WuYeBaoHubSensor):
+    """人脸信息 sensor (registered faces + granted door auths)."""
+
+    _attr_name = "人脸信息"
+    _attr_icon = "mdi:face-recognition"
+
+    def __init__(self, client: WuYeBaoClient, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(client, entry_id, "face")
+
+    def _value_from(self, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return None
+        return len(data.get("faces") or [])
+
+    def _attrs_from(self, data: Any) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            return {}
+        faces = data.get("faces") or []
+        auths = data.get("faceAuths") or []
+        return {
+            "faces": len(faces),
+            "face_valid_time": data.get("faceValidTime"),
+            "face_images": [f.get("image") for f in faces[:10]],
+            "auth_gates": [
+                {
+                    "community": a.get("communityName"),
+                    "area": a.get("areaName"),
+                    "building": a.get("buildingName"),
+                    "unit": a.get("unitName"),
+                }
+                for a in auths[:10]
+            ],
+        }
+
+
+class WuYeBaoNoticeSensor(_WuYeBaoHubSensor):
+    """小区公告 sensor (homepage carousel ads / notices)."""
+
+    _attr_name = "小区公告"
+    _attr_icon = "mdi:bullhorn"
+
+    def __init__(self, client: WuYeBaoClient, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(client, entry_id, "contents")
+
+    def _value_from(self, data: Any) -> Any:
+        if not isinstance(data, list) or not data:
+            return None
+        # data: [{"classify": {...}, "contents": [...]}]
+        contents = data[0].get("contents") or []
+        return len(contents)
+
+    def _attrs_from(self, data: Any) -> dict[str, Any]:
+        if not isinstance(data, list) or not data:
+            return {"count": 0, "images": []}
+        classify = data[0].get("classify") or {}
+        contents = data[0].get("contents") or []
+        return {
+            "count": len(contents),
+            "type": classify.get("type"),
+            "classify_id": classify.get("classifyId"),
+            "images": [c.get("imageUrl") for c in contents[:20]],
+            "latest_image": contents[0].get("imageUrl") if contents else None,
+        }
+
+
+class WuYeBaoAlarmSensor(_WuYeBaoHubSensor):
+    """门禁报警 sensor (alarm records count + latest)."""
+
+    _attr_name = "门禁报警"
+    _attr_icon = "mdi:shield-alert"
+
+    def __init__(self, client: WuYeBaoClient, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(client, entry_id, "alarms")
+
+    def _value_from(self, data: Any) -> Any:
+        return len(data) if isinstance(data, list) else None
+
+    def _attrs_from(self, data: Any) -> dict[str, Any]:
+        if not isinstance(data, list) or not data:
+            return {"count": 0, "latest": []}
+        latest = []
+        for a in data[:10]:
+            latest.append(
+                {
+                    "id": a.get("id"),
+                    "device": a.get("deviceNumber") or a.get("deviceNo"),
+                    "type": a.get("devicesType") or a.get("deviceType"),
+                    "image": a.get("imageUrl") or a.get("image") or a.get("url"),
+                    "time": a.get("createTime") or a.get("alarmTime"),
+                }
+            )
+        return {"count": len(data), "latest": latest}

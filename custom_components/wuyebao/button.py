@@ -24,87 +24,66 @@ async def async_setup_entry(
     """Set up 物业宝 buttons based on a config entry."""
     client: WuYeBaoClient = hass.data[DOMAIN][entry.entry_id]
 
-    try:
-        gates = await client.get_gates()
-        _LOGGER.info("Found %d gates for buttons", len(gates))
-    except Exception as err:
-        _LOGGER.error("Failed to get gates: %s", err)
-        gates = []
-
-    # Create monitor buttons for all gates (wall and outdoor)
-    entities = []
-    for gate in gates:
-        gate_type = gate.get("type", "")
-        # Wall gates and unit doors both have cameras
-        if gate_type in ("wall", "outdoor"):
-            entities.append(WuYeBaoMonitorButton(client, entry.entry_id, gate))
-
-    async_add_entities(entities)
+    # One "生成访客码" button mounted on the hub device (visitor codes are
+    # bound to the owner's unit, not to a single gate).
+    async_add_entities([WuYeBaoVisitorButton(client, entry.entry_id, hass)])
 
 
-class WuYeBaoMonitorButton(ButtonEntity):
-    """Button to start monitoring a gate."""
+class WuYeBaoVisitorButton(ButtonEntity):
+    """Button to create a visitor invite and obtain a 6-digit door code.
+
+    The generated code is valid for 1 hour (matching the app default) and is
+    shown in a persistent notification plus cached on the client for the
+    访客邀请 sensor.
+    """
 
     _attr_has_entity_name = True
-    _attr_name = "查看监控"
-    _attr_icon = "mdi:cctv"
+    _attr_name = "生成访客码"
+    _attr_icon = "mdi:account-key-plus"
 
     def __init__(
         self,
         client: WuYeBaoClient,
         entry_id: str,
-        gate: dict[str, Any],
+        hass: HomeAssistant,
     ) -> None:
         """Initialize the button."""
         self._client = client
-        self._gate = gate
         self._entry_id = entry_id
-
-        gate_id = str(gate.get("id") or gate.get("uid") or gate.get("deviceNumber") or "unknown")
-        self._attr_unique_id = f"{entry_id}_monitor_{gate_id}"
-
-        # Build device name
-        device_name = self._build_device_name(gate)
-
+        self._hass = hass
+        self._attr_unique_id = f"{entry_id}_visitor_button"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"{entry_id}_{gate_id}")},
-            name=device_name,
+            identifiers={(DOMAIN, f"{entry_id}_hub")},
+            name="物业宝 主站",
             manufacturer="深圳家和云联",
-            model="物业宝 云门禁",
-            sw_version="1.1.1.51",
+            model="物业宝 集成",
         )
 
-    def _build_device_name(self, gate: dict[str, Any]) -> str:
-        """Build device name."""
-        alias = gate.get("alias", "")
-        if alias:
-            return str(alias).strip()
-
-        parts = []
-        community = gate.get("communityName")
-        if community:
-            parts.append(str(community))
-
-        area = gate.get("areaName", "")
-        if area:
-            parts.append(str(area))
-
-        device_number = gate.get("deviceNumber", "")
-        if device_number:
-            if device_number == "a":
-                parts.append("南门")
-            elif device_number == "b":
-                parts.append("北门")
-            else:
-                parts.append(f"门-{device_number}")
-
-        return " ".join(parts) if parts else f"门禁-{device_number}"
-
     async def async_press(self) -> None:
-        """Handle the button press."""
+        """Create a visitor invite (1 hour validity) and notify the code."""
+        result = await self._client.create_invite_visitor()
+        if not result:
+            raise RuntimeError("创建访客码失败：请检查 HA 日志")
+
+        password = result.get("password")
+        start = result.get("startTime")
+        end = result.get("endTime")
+        _LOGGER.info("Visitor code created: %s", password)
+
+        # Refresh the cached visitor list so the 访客邀请 sensor picks it up.
         try:
-            result = await self._client.start_monitor(self._gate)
-            _LOGGER.info("Monitor started: %s", result)
-        except Exception as err:
-            _LOGGER.error("Failed to start monitor: %s", err)
-            raise
+            self._client.hub_data["visitors"] = await self._client.get_invite_visitors()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Failed to refresh visitor list: %s", err)
+
+        try:
+            from homeassistant.components import persistent_notification
+
+            persistent_notification.async_create(
+                self._hass,
+                f"访客开门密码：**{password}**\n\n有效期至：{end}",
+                title="物业宝 访客码已生成",
+                notification_id=f"wuyebao_visitor_{self._entry_id}",
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Persistent notification failed: %s", err)

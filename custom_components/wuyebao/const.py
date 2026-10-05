@@ -25,6 +25,14 @@ API_GATES = "/api/device/grant/gates"
 API_OWNERS = "/api/owner/grant/owners"
 API_CALLS = "/api/call/{page}/{page_size}/grant/calls"
 API_ALARMS = "/api/alarm/grant/alarms"
+API_REPAIRS = "/api/repair/repairs"
+API_INVITE_VISITORS = "/api/invitevisitor/grant/invitevisitors"
+API_INVITE_VISITOR_CREATE = "/api/invitevisitor/grant"
+API_FACE_INFO = "/api/face/grant/faceinfo"
+API_CONTENTS = "/api/content/anon/classify/contents"
+
+# Content types for the 小区公告/轮播 content API (classifyId = communityId)
+CONTENT_TYPE_CAROUSEL = "TYPE_APP_CAROUSEL_ADS"
 
 # SIP
 DEFAULT_SIP_SERVER = "new-sip.jhws.top"

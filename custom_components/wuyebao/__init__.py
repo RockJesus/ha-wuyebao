@@ -22,10 +22,46 @@ PLATFORMS: list[Platform] = [
     Platform.SENSOR,
     Platform.SWITCH,
     Platform.CAMERA,
+    Platform.BUTTON,
 ]
 
 # Visitor auto-open: poll call records and open doors whose switch is ON.
 CALL_POLL_INTERVAL = 3.0
+
+# Hub-level sensors (repairs / visitors / face / contents / alarms) refresh.
+HUB_POLL_INTERVAL = 60.0
+
+
+async def _hub_data_poller(
+    hass: HomeAssistant,
+    client: WuYeBaoClient,
+) -> None:
+    """Periodically refresh hub-level sensor data.
+
+    Caches repairs, visitor invites, face info, homepage contents and alarm
+    records on ``client.hub_data``; the hub sensors read it on every poll.
+    """
+    _LOGGER.info("Hub data poller started")
+    while True:
+        try:
+            tasks = {
+                "repairs": client.get_repairs(),
+                "visitors": client.get_invite_visitors(),
+                "face": client.get_face_info(),
+                "contents": client.get_contents(),
+                "alarms": client.get_alarms(),
+            }
+            results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            for key, res in zip(tasks, results):
+                if isinstance(res, Exception):
+                    _LOGGER.debug("Hub data %s error: %s", key, res)
+                else:
+                    client.hub_data[key] = res
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - polling must never die
+            _LOGGER.debug("Hub poll error: %s", err)
+        await asyncio.sleep(HUB_POLL_INTERVAL)
 
 
 async def _visitor_call_poller(
@@ -160,6 +196,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     hass.data[DOMAIN]["visitor_poll_task"] = poll_task
 
+    # Hub-level sensor data poller (repairs / visitors / face / contents / alarms)
+    hub_task = entry.async_create_background_task(
+        hass,
+        _hub_data_poller(hass, client),
+        "wuyebao-hub-data",
+    )
+    hass.data[DOMAIN]["hub_poll_task"] = hub_task
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
@@ -172,6 +216,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         poll_task = hass.data[DOMAIN].get("visitor_poll_task")
         if poll_task:
             poll_task.cancel()
+        # stop the hub data poller
+        hub_task = hass.data[DOMAIN].get("hub_poll_task")
+        if hub_task:
+            hub_task.cancel()
         # stop live video sessions / RTSP server
         rtsp_server = hass.data[DOMAIN].get("rtsp_server")
         manager = hass.data[DOMAIN].get("video_manager")

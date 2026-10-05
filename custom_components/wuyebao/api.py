@@ -17,6 +17,13 @@ from .const import (
     API_GATES,
     API_OWNERS,
     API_CALLS,
+    API_ALARMS,
+    API_REPAIRS,
+    API_INVITE_VISITORS,
+    API_INVITE_VISITOR_CREATE,
+    API_FACE_INFO,
+    API_CONTENTS,
+    CONTENT_TYPE_CAROUSEL,
     DEFAULT_BASE_URL,
     DEFAULT_CLIENT_ID,
     DEFAULT_SIP_CLIENT_ID,
@@ -72,6 +79,10 @@ class WuYeBaoClient:
         self.binding_code: str | None = None
         self.unit_id: str | None = None
         self.owners: list[dict[str, Any]] = []
+
+        # Hub-level cached data (repairs / visitors / face / contents / alarms),
+        # refreshed periodically by the hub poller in __init__.py.
+        self.hub_data: dict[str, Any] = {}
 
     @property
     def access_token(self) -> str | None:
@@ -495,6 +506,122 @@ class WuYeBaoClient:
         if isinstance(raw, list):
             return raw
         # Some APIs wrap the list in {"list": [...]}
+        if isinstance(raw, dict):
+            for key in ("list", "records", "items"):
+                val = raw.get(key)
+                if isinstance(val, list):
+                    return val
+        return []
+
+    async def get_repairs(
+        self, page: int = 1, page_size: int = 20
+    ) -> list[dict[str, Any]]:
+        """Get 报修工单 records for the current owner."""
+        params: dict[str, Any] = {"ownerId": self.owner_id} if self.owner_id else {}
+        params["pageNo"] = page
+        params["pageSize"] = page_size
+        try:
+            data = await self._request(
+                "GET", API_REPAIRS, token=self._access_token, params=params
+            )
+        except Exception as err:
+            _LOGGER.debug("Repair records unavailable: %s", err)
+            return []
+        raw = data.get("data", data)
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict):
+            for key in ("list", "records", "items"):
+                val = raw.get(key)
+                if isinstance(val, list):
+                    return val
+        return []
+
+    async def get_invite_visitors(self) -> list[dict[str, Any]]:
+        """Get 访客邀请 (invite visitor) records for the current owner."""
+        params: dict[str, Any] = {"ownerId": self.owner_id} if self.owner_id else {}
+        try:
+            data = await self._request(
+                "GET", API_INVITE_VISITORS, token=self._access_token, params=params
+            )
+        except Exception as err:
+            _LOGGER.debug("Invite visitor records unavailable: %s", err)
+            return []
+        raw = data.get("data", data)
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict):
+            for key in ("list", "records", "items"):
+                val = raw.get(key)
+                if isinstance(val, list):
+                    return val
+        return []
+
+    async def create_invite_visitor(
+        self, start_time: int | None = None, end_time: int | None = None
+    ) -> dict[str, Any] | None:
+        """Create a 访客邀请 and return the visitor door code (6-digit password).
+
+        The app default validity is 1 hour (startTime/endTime are ms epochs).
+        """
+        import time as _time
+
+        now_ms = int(_time.time() * 1000)
+        start = start_time or now_ms
+        end = end_time or (now_ms + 3600 * 1000)
+        payload = {
+            "ownerId": self.owner_id,
+            "communityId": self.community_id,
+            "unitId": self.unit_id,
+            "startTime": start,
+            "endTime": end,
+        }
+        try:
+            data = await self._request(
+                "POST",
+                API_INVITE_VISITOR_CREATE,
+                token=self._access_token,
+                payload=payload,
+            )
+        except Exception as err:
+            _LOGGER.error("Failed to create invite visitor: %s", err)
+            return None
+        raw = data.get("data", data)
+        return raw if isinstance(raw, dict) else None
+
+    async def get_face_info(self, user_id: str | None = None) -> dict[str, Any] | None:
+        """Get 人脸信息 for a user (defaults to the logged-in user)."""
+        uid = user_id or self.user_id
+        if not uid:
+            return None
+        params = {"userId": uid}
+        try:
+            data = await self._request(
+                "GET", API_FACE_INFO, token=self._access_token, params=params
+            )
+        except Exception as err:
+            _LOGGER.debug("Face info unavailable: %s", err)
+            return None
+        raw = data.get("data", data)
+        return raw if isinstance(raw, dict) else None
+
+    async def get_contents(
+        self, content_type: str = CONTENT_TYPE_CAROUSEL
+    ) -> list[dict[str, Any]]:
+        """Get 小区公告/首页轮播 contents (classifyId = communityId)."""
+        if not self.community_id:
+            return []
+        params = {"classifyId": self.community_id, "type": content_type}
+        try:
+            data = await self._request(
+                "GET", API_CONTENTS, token=self._access_token, params=params
+            )
+        except Exception as err:
+            _LOGGER.debug("Contents unavailable: %s", err)
+            return []
+        raw = data.get("data", data)
+        if isinstance(raw, list):
+            return raw
         if isinstance(raw, dict):
             for key in ("list", "records", "items"):
                 val = raw.get(key)
