@@ -100,11 +100,15 @@ def _build_device_name(gate: dict[str, Any]) -> str:
 
 
 class WuYeBaoCamera(Camera):
-    """Static monitor camera: latest matched call/alarm snapshot."""
+    """Latest visitor camera: snapshot of the most recent doorbell call.
+
+    The value shown is the last visitor's doorbell snapshot for this gate
+    (from call records, strictly matched by deviceNumber + devicesType).
+    """
 
     _attr_has_entity_name = True
-    _attr_name = "监控"
-    _attr_icon = "mdi:cctv"
+    _attr_name = "最近访客"
+    _attr_icon = "mdi:account-arrow-right-outline"
     _attr_frame_interval = 30.0
 
     def __init__(
@@ -119,6 +123,7 @@ class WuYeBaoCamera(Camera):
         self._gate = gate
         self._entry_id = entry_id
         self._gid = _gate_id(gate)
+        self._last_visit_time: Any = None
 
         self._attr_unique_id = f"{entry_id}_camera_{self._gid}"
         self._attr_device_info = self._build_device_info(gate)
@@ -133,14 +138,26 @@ class WuYeBaoCamera(Camera):
             sw_version="1.1.1.51",
         )
 
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Visitor snapshot metadata."""
+        return {
+            "gate_id": self._gid,
+            "device_number": self._gate.get("deviceNumber", ""),
+            "最近访客时间": self._last_visit_time,
+        }
+
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
         """Return the latest matched snapshot for this gate only."""
         try:
-            image_url = await self._client.get_gate_snapshot(self._gate)
-            if image_url:
-                data = await self._client.download_image(image_url)
+            info = await self._client.get_latest_call_info(self._gate)
+            if info:
+                if info.get("time") and info.get("time") != self._last_visit_time:
+                    self._last_visit_time = info.get("time")
+                    self.async_write_ha_state()
+                data = await self._client.download_image(info["url"])
                 if data:
                     return data
                 _LOGGER.warning("Camera %s: image download failed", self.name)
@@ -189,6 +206,16 @@ class WuYeBaoLiveCamera(Camera):
         camera/webrtc.py's async_get_supported_provider.
         """
         return f"rtsp://127.0.0.1:8556/{self._gid}"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """RTSP URL exposed here since the standalone 流地址 sensor was
+        removed in v6.6.8 (go2rtc / ffmpeg users copy it from attributes)."""
+        return {
+            "gate_id": self._gid,
+            "rtsp_url": f"rtsp://127.0.0.1:8556/{self._gid}",
+            "device_number": self._gate.get("deviceNumber", ""),
+        }
 
     @property
     def supported_features(self) -> CameraEntityFeature:
