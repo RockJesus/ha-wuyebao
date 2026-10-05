@@ -816,11 +816,16 @@ class SipMonitorCall:
             if not self._running.is_set():
                 break
             if attempt > 1:
+                # 486 Busy Here means the gate device is busy right now; give
+                # it more time to finish whatever it is doing (the official
+                # app also waits several seconds between retries).  Other
+                # failures (no media etc.) retry briskly.
+                delay = 6.0 if last.get("status") == 486 else retry_delay
                 _LOGGER.info(
                     "Monitor %s retry %d/%d (delay %.1fs)",
-                    self.gt_uri, attempt, max_attempts, retry_delay,
+                    self.gt_uri, attempt, max_attempts, delay,
                 )
-                time.sleep(retry_delay)
+                time.sleep(delay)
                 self._reset_session()
                 if not self._register():
                     last = {"ok": False, "status": 0, "error": "REGISTER failed"}
