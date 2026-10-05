@@ -259,6 +259,8 @@ class SipMonitorCall:
         # H264 NAL type histogram of received RTP (diagnostics): keys 7=SPS
         # 8=PPS 5=IDR 1=slice 0=other; 28=FU-A resolved into its real type.
         self._nal_stats: dict[int, int] = defaultdict(int)
+        self._sps_inband = False
+        self._pps_inband = False
 
     def _dbg(self, ev: str) -> None:
         self.debug_events.append(f"{time.time():.1f} {ev}")
@@ -673,16 +675,20 @@ class SipMonitorCall:
                     self._logged_first_rtp = True
                     _LOGGER.debug("First video RTP from %s len=%d", addr, len(data))
 
-                # Extract SPS/PPS from H264 payload (for RTSP DESCRIBE)
+                # Extract SPS/PPS from H264 payload (for RTSP DESCRIBE).
+                # In-band bare SPS/PPS wins over STAP-A-carried ones so a
+                # gate that embeds parameter sets keeps its exact sets.
                 payload = data[12:]
                 if payload:
                     nal_type = payload[0] & 0x1F
                     if nal_type == 7 and len(payload) >= 4:  # SPS
                         self._nal_stats[7] += 1
+                        self._sps_inband = True
                         with self._sps_pps_lock:
                             self.sps = payload
                     elif nal_type == 8 and len(payload) >= 3:  # PPS
                         self._nal_stats[8] += 1
+                        self._pps_inband = True
                         with self._sps_pps_lock:
                             self.pps = payload
                     elif nal_type == 5:  # IDR
@@ -697,12 +703,14 @@ class SipMonitorCall:
                             real_type = fu_header & 0x1F
                             if real_type == 7:  # SPS in FU-A
                                 self._nal_stats[7] += 1
+                                self._sps_inband = True
                                 nal = bytes([(nri << 5) | 7]) + payload[2:]
                                 with self._sps_pps_lock:
                                     if len(nal) >= 4:
                                         self.sps = nal
                             elif real_type == 8:  # PPS in FU-A
                                 self._nal_stats[8] += 1
+                                self._pps_inband = True
                                 nal = bytes([(nri << 5) | 8]) + payload[2:]
                                 with self._sps_pps_lock:
                                     if len(nal) >= 3:
@@ -711,8 +719,9 @@ class SipMonitorCall:
                                 self._nal_stats[real_type] += 1
                     elif nal_type == 24 and len(payload) >= 3:  # STAP-A
                         # Aggregate packet: sequence of [2B len][NAL unit].
-                        # Some gates (e.g. north gate GT-840-1-0-0-0-b) wrap
-                        # SPS/PPS+IDR into STAP-A instead of bare NALs.
+                        # Used as a parameter-set fallback only for gates that
+                        # never send bare in-band SPS/PPS (north gate
+                        # GT-840-1-0-0-0-b streams IDR-only + STAP-A).
                         self._nal_stats[24] += 1
                         i = 1
                         while i + 2 < len(payload):
@@ -727,12 +736,16 @@ class SipMonitorCall:
                             sub_type = sub[0] & 0x1F
                             if sub_type == 7 and len(sub) >= 4:
                                 self._nal_stats[7] += 1
-                                with self._sps_pps_lock:
-                                    self.sps = sub
+                                if not self._sps_inband:
+                                    with self._sps_pps_lock:
+                                        if self.sps is None:
+                                            self.sps = sub
                             elif sub_type == 8 and len(sub) >= 3:
                                 self._nal_stats[8] += 1
-                                with self._sps_pps_lock:
-                                    self.pps = sub
+                                if not self._pps_inband:
+                                    with self._sps_pps_lock:
+                                        if self.pps is None:
+                                            self.pps = sub
                             elif sub_type in (1, 5):
                                 self._nal_stats[sub_type] += 1
                     else:
