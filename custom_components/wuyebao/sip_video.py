@@ -199,6 +199,10 @@ class SipMonitorCall:
         self._rtcp_sock: socket.socket | None = None
         self._rtp_thread: threading.Thread | None = None
         self._running = threading.Event()
+        # Timestamp of the last video RTP packet (0.0 = none yet).
+        # The stream-health watchdog uses this to detect a stalled gate
+        # (device stops pushing RTP after ~30s) and automatically rebuild.
+        self.last_rtp_time: float = 0.0
         self._lock = threading.Lock()
         self._ssrc: int | None = None
         # Live stream metadata so injected parameter-set packets can share
@@ -618,6 +622,7 @@ class SipMonitorCall:
                 received_rtp = True
                 self._video_received = True
                 self._video_packet_count = getattr(self, "_video_packet_count", 0) + 1
+                self.last_rtp_time = time.time()
                 # Track the stream's SSRC/timestamp/sequence so injected
                 # parameter-set packets look like part of the media stream.
                 self._stream_ssrc = int.from_bytes(data[8:12], "big")
@@ -710,6 +715,18 @@ class SipMonitorCall:
     def subscriber_count(self) -> int:
         with self._lock:
             return len(self._subscribers) + len(self._tcp_subscribers)
+
+    def is_stream_alive(self, silence_threshold: float) -> bool:
+        """True while video RTP is still arriving.
+
+        The gate devices stop pushing RTP roughly 30s after the INVITE
+        (no keepalive on the media path), which freezes the picture while
+        the session stays open.  The watchdog calls this with a threshold
+        (e.g. 10s) and rebuilds the session when it returns False.
+        """
+        if self.last_rtp_time <= 0:
+            return False
+        return (time.time() - self.last_rtp_time) < silence_threshold
 
     def get_sps_pps(self) -> tuple[bytes | None, bytes | None]:
         with self._sps_pps_lock:
