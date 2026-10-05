@@ -20,13 +20,22 @@ _LOGGER = logging.getLogger(__name__)
 
 RTSP_HOST = "0.0.0.0"
 RTSP_PORT = 8556
-# How long a session with no RTSP clients is kept alive.  Long on purpose:
-# for unit doors the first client connection acts as a warm-up - the SIP
-# call can take 30-60s to produce video, so the client's first DESCRIBE
-# may time out and reconnect.  Keeping the session for 2 minutes lets the
-# reconnect reuse the now-established call and show video immediately
-# instead of restarting the whole INVITE dance from scratch.
-IDLE_STOP_AFTER = 120  # seconds without RTSP clients -> BYE
+# How long a session with no RTSP clients is kept alive.  This is ONLY the
+# fallback for clients that drop the TCP connection without sending
+# TEARDOWN: a normal "stop live view" sends TEARDOWN and the session is
+# stopped immediately.  The short window exists so a transient reconnect
+# (HA stream / go2rtc retry) can reuse the already-established SIP call
+# instead of restarting the INVITE dance; once it expires the session is
+# torn down (BYE) and no requests are sent until the user opens the live
+# view again.
+IDLE_STOP_AFTER = 15  # seconds without RTSP clients -> BYE
+
+# Watchdog rebuild cooldown: when a connected client exists but the media
+# stream goes silent, the watchdog rebuilds the SIP session.  A stuck
+# client that keeps reconnecting (misconfigured go2rtc etc.) must not
+# cause an endless loop of requests, so rebuilds are rate-limited.
+MAX_REBUILDS_PER_WINDOW = 4  # rebuilds allowed per window per gate
+REBUILD_WINDOW = 60.0  # seconds
 
 
 class VideoSessionManager:
@@ -40,6 +49,8 @@ class VideoSessionManager:
         self._watchdog_task: asyncio.Task | None = None
         self._restarting: set[str] = set()
         self._restart_tasks: set[asyncio.Task] = set()
+        # rebuild timestamps per gate (monotonic) for watchdog cooldown
+        self._restart_times: dict[str, list[float]] = {}
         # DESCRIBE/PLAY background session-starts (shielded, may outlive the
         # client request); cancelled on shutdown so unload never waits on them
         self._pending_tasks: set[asyncio.Task] = set()
@@ -59,6 +70,17 @@ class VideoSessionManager:
     def get_session(self, gate_id: str) -> SipMonitorCall | None:
         """Return the active monitor session without starting a new call."""
         return self._sessions.get(gate_id)
+
+    async def stop_session(self, gate_id: str) -> None:
+        """Immediately stop and remove the SIP session (client closed the
+        live view via TEARDOWN).  Idempotent; never blocks for long."""
+        sess = self._sessions.pop(gate_id, None)
+        if sess is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.to_thread(sess.stop), 15.0)
+        except Exception:
+            pass
 
     async def get_or_start(self, gate_id: str) -> SipMonitorCall | None:
         """Return the active monitor session for gate_id, starting it if needed."""
@@ -187,8 +209,25 @@ class VideoSessionManager:
                 if sess.subscriber_count() > 0
                 and not sess.is_stream_alive(self.SILENCE_THRESHOLD)
             ]
+            now = time.monotonic()
             for gid in stalled:
                 if gid in self._restarting:
+                    continue
+                # rebuild cooldown: a client that keeps reconnecting and
+                # never receives media must not trigger endless SIP calls.
+                recent = [
+                    t for t in self._restart_times.get(gid, [])
+                    if now - t < REBUILD_WINDOW
+                ]
+                if len(recent) >= MAX_REBUILDS_PER_WINDOW:
+                    _LOGGER.warning(
+                        "Monitor stream %s silent and rebuilds rate-limited - "
+                        "stopping session until the client reconnects",
+                        gid,
+                    )
+                    sess = self._sessions.pop(gid, None)
+                    if sess is not None:
+                        await asyncio.to_thread(sess.stop)
                     continue
                 self._restarting.add(gid)
                 sess = self._sessions.pop(gid, None)
@@ -208,6 +247,7 @@ class VideoSessionManager:
         """Rebuild a stalled session (runs outside the lock)."""
         task = asyncio.current_task()
         try:
+            self._restart_times.setdefault(gate_id, []).append(time.monotonic())
             async with self._lock:
                 sess = self._sessions.get(gate_id)
                 if sess is not None:
@@ -654,6 +694,12 @@ class RtspClientConnection:
         if method == "TEARDOWN":
             await self._teardown()
             await self._send("200 OK", {"CSeq": cseq, "Session": self._session_id})
+            # Explicit "stop live view": tear the SIP session down right
+            # away so no requests continue after the user closed the view.
+            if self._gate_id is not None:
+                sess = self._manager.get_session(self._gate_id)
+                if sess is not None and sess.subscriber_count() == 0:
+                    await self._manager.stop_session(self._gate_id)
             return False
 
         await self._send("405 Method Not Allowed", {"CSeq": cseq})
