@@ -781,8 +781,8 @@ class SipMonitorCall:
             return {"ok": False, "status": 0, "error": "REGISTER failed"}
         self._running.set()
 
-        max_attempts = getattr(self, "max_monitor_attempts", 6)
-        retry_delay = getattr(self, "monitor_retry_delay", 2.0)
+        max_attempts = getattr(self, "max_monitor_attempts", 8)
+        retry_delay = getattr(self, "monitor_retry_delay", 1.5)
         last = {"ok": False, "status": 0, "error": "INVITE failed"}
         for attempt in range(1, max_attempts + 1):
             if not self._running.is_set():
@@ -853,7 +853,11 @@ class SipMonitorCall:
         sdp = raw.partition("\r\n\r\n")[2]
         final_code = code
         acked = False
-        deadline = time.time() + 25.0
+        # Shorter final-response window: slow gates answer with 183 quickly,
+        # so waiting 25s for a 200 OK only wastes time before the media
+        # confirmation phase.  The real delay for unit doors is the media
+        # start after the answer - handled below with a longer confirm.
+        deadline = time.time() + 15.0
         while time.time() < deadline:
             try:
                 extra = _recv_full(self._sock, min(2.0, deadline - time.time()))
@@ -1052,10 +1056,13 @@ class SipMonitorCall:
         # 183 early-media gate that rings then answers streams only a few
         # probe packets (the app abandons those attempts too - only the
         # attempt where the device answers straight away streams video).
-        # Require a *sustained* packet stream: enough packets AND no quiet
-        # gap, so a ringtone trickle is never mistaken for a live stream.
+        # The confirmation window is LONG (15s) on purpose: wall gates push
+        # video immediately but unit doors take 10-30s after the answer to
+        # start their RTP stream - a short window (5s) misjudged those as
+        # "no media", tore the call down and retried forever.  A strong
+        # stream (>= 4x min_packets) still exits early.
         min_packets = getattr(self, "min_video_packets", 10)
-        deadline = time.time() + 5.0
+        deadline = time.time() + 15.0
         last_pkt = 0.0
         count = 0
         while time.time() < deadline:
