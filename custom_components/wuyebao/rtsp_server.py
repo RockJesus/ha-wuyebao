@@ -162,9 +162,10 @@ class VideoSessionManager:
                 self._sessions[gate_id] = call
                 return call
             _LOGGER.warning(
-                "No video media for %s, tearing down and retrying | %s",
+                "No video media for %s, tearing down and retrying | %s | nals=%s",
                 gate_id,
                 getattr(call, "last_debug", "") or "no-debug",
+                dict(getattr(call, "_nal_stats", {})),
             )
             await asyncio.to_thread(call.stop)
             if attempt < 4:
