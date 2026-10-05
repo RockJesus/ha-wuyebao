@@ -1143,13 +1143,28 @@ class SipMonitorCall:
         deadline = time.time() + 45.0
         last_pkt = 0.0
         count = 0
+        last_pfu = 0.0
         while time.time() < deadline:
             c = getattr(self, "_video_packet_count", 0)
             if c > count:
                 count = c
                 last_pkt = time.time()
+                last_pfu = time.time()
             if count >= min_packets * 4:
                 break  # strong real stream
+            # Keep requesting key frames until real video arrives.  The
+            # north gate pushes only SPS/PPS after the answer and waits
+            # for a picture_fast_update INFO in the FINAL dialog (tagged
+            # with its 200 OK To-tag) before it starts sending IDRs; if
+            # the 200 OK arrived late the first INFO used the 183 tag and
+            # was ignored.  Re-send with the latest tag on a short timer.
+            now = time.time()
+            if now - last_pfu > 3.0:
+                last_pfu = now
+                try:
+                    self._send_picture_fast_update()
+                except Exception:
+                    pass
             time.sleep(0.1)
         # success only if media is (still) flowing at window end, or the
         # strong-stream threshold was crossed; a trickle that stopped
