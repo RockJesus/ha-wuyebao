@@ -138,7 +138,12 @@ class VideoSessionManager:
                 "Starting monitor call for %s (%s) attempt %d/5",
                 gate_id, gt_uri, attempt + 1,
             )
-            result = await asyncio.to_thread(call.start)
+            try:
+                result = await asyncio.to_thread(call.start)
+            except Exception as exc:  # noqa: BLE001 - never let the monitor thread die silently
+                _LOGGER.error("Monitor call start EXCEPTION for %s: %s", gate_id, exc)
+                result = {"ok": False, "status": 0, "error": f"EXCEPTION {exc}"}
+                await asyncio.to_thread(call.stop)
             if not result.get("ok"):
                 _LOGGER.error(
                     "Monitor call start failed for %s: %s", gate_id, result
