@@ -339,12 +339,11 @@ class SipMonitorCall:
             f"INVITE sip:{self.gt_uri}@{SIP_REALM};transport=tcp SIP/2.0",
             f"Via: SIP/2.0/TCP {self._local_ip}:5060;rport;branch={branch};alias",
             "Max-Forwards: 70",
-            # v6.6.3 used angle-bracketed From/To here; unit/north gate
-            # devices REQUIRE that form (bare URIs answer INVITE with
-            # 183/200 but never push RTP -> "answered but no sustained
-            # video (0 pkts)" observed on north gate / unit doors).
-            f"From: <sip:{self.user}@{SIP_REALM}>;tag={tag}",
-            f"To: <sip:{self.gt_uri}@{SIP_REALM}>",
+            # v6.6.6 (verified on ALL gates) used bare From/To URIs (no
+            # angle brackets) exactly like the official app; that form is
+            # what the north gate / unit doors accept and answer.
+            f"From: sip:{self.user}@{SIP_REALM};tag={tag}",
+            f"To: sip:{self.gt_uri}@{SIP_REALM}",
             f"Contact: {contact}",
             f"Call-ID: {call_id}",
             "CSeq: 2 INVITE",
@@ -1099,6 +1098,15 @@ class SipMonitorCall:
             self._dbg(f"already ACKed, skip (code={final_code})")
         acked = True
         self._hole_punch()
+
+        # Request a key frame from the device (v6.6.6 behaviour): without
+        # this INFO, north gate / unit doors stay silent after the ACK.
+        # Best-effort: ignore failures (the device also pushes key frames
+        # on its own INFO picture_fast_update which we answer 200 OK).
+        try:
+            self._send_picture_fast_update()
+        except Exception:
+            pass
 
         # After the ACK keep draining briefly: late INFO and the final
         # 200 OK may arrive now - answer INFO and refresh media target.
