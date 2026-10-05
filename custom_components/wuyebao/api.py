@@ -79,6 +79,9 @@ class WuYeBaoClient:
         self.binding_code: str | None = None
         self.unit_id: str | None = None
         self.owners: list[dict[str, Any]] = []
+        # Owner's flat number (e.g. "2702"), used for elevator call
+        # ("call_elevator" room) and 户户通 (RM indoor-unit URI).
+        self.room: str | None = None
 
         # Hub-level cached data (repairs / visitors / face / contents / alarms),
         # refreshed periodically by the hub poller in __init__.py.
@@ -793,6 +796,103 @@ class WuYeBaoClient:
             )
 
         return result
+
+    async def call_elevator_sip(self, gate: dict[str, Any]) -> dict[str, Any]:
+        """Call the elevator via SIP MESSAGE (app: call_elevator).
+
+        The app sends the SAME OD URI used for unlocking the unit door but
+        with body {"id":null,"type":"call_elevator","content":{"room":...}}.
+        room is the owner's flat number configured in the config flow.
+        """
+        if not self.room:
+            raise WuYeBaoApiError("房间号未配置：请编辑集成配置填写房间号（如 2702）")
+
+        # Auto-refresh SIP token if expired
+        if not self.sip_jwt or self._sip_token_expires < time.time() + 300:
+            try:
+                await self.refresh_sip_token()
+            except Exception as err:
+                raise WuYeBaoApiError(f"Failed to refresh SIP token: {err}")
+
+        if not self.sip_jwt:
+            raise WuYeBaoApiError("SIP JWT not available")
+
+        community_code = str(gate.get("communityCode") or self.community_code or "0")
+        area_code = str(gate.get("areaCode") or "0")
+        building_code = str(gate.get("buildingCode") or "0")
+        unit_code = str(gate.get("unitCode") or "0")
+        floor_code = str(gate.get("floorCode") or "0")
+        device_number = str(gate.get("deviceNumber") or "")
+
+        if not device_number:
+            raise WuYeBaoApiError("Missing required fields: deviceNumber")
+
+        def _do_call() -> dict[str, Any]:
+            client = WuYeBaoSipClient(
+                user=self.username,
+                jwt=self.sip_jwt,
+                sid=self.sip_sid,
+            )
+            return client.call_elevator(
+                room=str(self.room),
+                device_number=device_number,
+                community_code=community_code,
+                area_code=area_code,
+                building_code=building_code,
+                unit_code=unit_code,
+                floor_code=floor_code,
+            )
+
+        result = await asyncio.to_thread(_do_call)
+
+        if not result.get("ok"):
+            raise WuYeBaoApiError(
+                f"SIP elevator call failed: status={result.get('status')} error={result.get('error', '')}"
+            )
+
+        return result
+
+    def find_own_gate(self, gates: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Find the owner's own unit-door gate (outdoor, unitId == self.unit_id).
+
+        Used to build the RM (indoor-unit) URI for 户户通.  Falls back to the
+        first outdoor gate so the feature still works when unitId matching
+        fails.
+        """
+        if not gates:
+            return None
+        for g in gates:
+            if g.get("type") == "outdoor" and self.unit_id and str(
+                g.get("unitId") or ""
+            ) == str(self.unit_id):
+                return g
+        for g in gates:
+            if g.get("type") == "outdoor":
+                return g
+        return None
+
+    def build_household_uri(self, gate: dict[str, Any]) -> str | None:
+        """Build the RM indoor-unit SIP URI for 户户通.
+
+        App format (captured from pcap):
+            INVITE sip:RM-840-1-4-1-27-2@jhws.top;transport=tcp
+        RM-<communityCode>-<areaCode>-<buildingCode>-<unitCode>-<floor>-<room>
+        room "2702" -> floor 27, room 02 (leading zero trimmed: "2").
+        """
+        if not self.room or not gate:
+            return None
+        room = str(self.room)
+        if len(room) >= 3:
+            floor = room[:-2]
+            room_code = str(int(room[-2:]))
+        else:
+            floor = room
+            room_code = str(int(room))
+        community = str(gate.get("communityCode") or self.community_code or "0")
+        area = str(gate.get("areaCode") or "0")
+        building = str(gate.get("buildingCode") or "0")
+        unit = str(gate.get("unitCode") or "0")
+        return f"RM-{community}-{area}-{building}-{unit}-{floor}-{room_code}"
 
     async def async_close(self) -> None:
         """Close the session."""

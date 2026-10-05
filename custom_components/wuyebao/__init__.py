@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import entity_registry as er
 
-from .const import CONF_PASSWORD, CONF_USERNAME, DOMAIN
+from .const import CONF_PASSWORD, CONF_ROOM, CONF_USERNAME, DOMAIN
 from .api import WuYeBaoClient
 from .rtsp_server import RtspServer, VideoSessionManager
 
@@ -129,6 +129,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         password=entry.data[CONF_PASSWORD],
         session=session,
     )
+    # Owner's flat number (elevator call / 户户通 target)
+    client.room = (entry.data.get(CONF_ROOM) or "").strip() or None
+    if client.room:
+        _LOGGER.info("Room configured: %s", client.room)
 
     try:
         await client.login()

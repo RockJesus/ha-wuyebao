@@ -10,7 +10,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
 
-from .const import CONF_PASSWORD, CONF_USERNAME, DOMAIN
+from .const import CONF_PASSWORD, CONF_ROOM, CONF_USERNAME, DOMAIN
 from .api import WuYeBaoClient, WuYeBaoAuthError
 
 _LOGGER = logging.getLogger(__name__)
@@ -19,6 +19,13 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_USERNAME): str,
         vol.Required(CONF_PASSWORD): str,
+        vol.Optional(
+            CONF_ROOM,
+            description={
+                "suggested_value": "",
+                "placeholder": "如 2702（呼叫电梯/户户通用）",
+            },
+        ): str,
     }
 )
 

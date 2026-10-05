@@ -215,6 +215,76 @@ class WuYeBaoSipClient:
             except Exception:
                 pass
 
+    def call_elevator(
+        self,
+        room: str,
+        device_number: str,
+        community_code: str,
+        area_code: str = "0",
+        building_code: str = "0",
+        unit_code: str = "0",
+        floor_code: str = "0",
+    ) -> dict:
+        """Send SIP MESSAGE to call the elevator (app: call_elevator).
+
+        The app targets the same OD (outdoor/unit-door controller) URI used
+        for unlocking, but with a different JSON body:
+            {"id":null,"type":"call_elevator","content":{"room":"2702"}}
+        room is the owner's flat number (e.g. 2702 = 27th floor, flat 02).
+        """
+        reg = self.register()
+        if not reg.get("ok"):
+            return reg
+        sock = reg.get("_sock")
+        if sock is None:
+            return {"ok": False, "status": 0, "error": "no socket after REGISTER"}
+
+        try:
+            od_uri = (
+                f"OD-{community_code}-{area_code}-{building_code}-{unit_code}"
+                f"-{floor_code}-{device_number}"
+            )
+            body = json.dumps(
+                {
+                    "id": None,
+                    "type": "call_elevator",
+                    "content": {"room": str(room)},
+                },
+                separators=(",", ":"),
+            )
+            branch = _gen_branch()
+            tag = _gen_tag()
+            call_id = uuid.uuid4().hex[:24]
+            lines = [
+                f"MESSAGE sip:{od_uri}@{SIP_REALM} SIP/2.0",
+                f"Via: SIP/2.0/TCP {self._local_ip}:5060;rport;branch={branch};alias",
+                "Max-Forwards: 70",
+                f"From: <sip:{self.user}@{SIP_REALM}>;tag={tag}",
+                f"To: <sip:{od_uri}@{SIP_REALM}>",
+                f"Call-ID: {call_id}",
+                "CSeq: 2 MESSAGE",
+                f"Route: {SIP_ROUTE}",
+                f"User-Agent: {SIP_UA}",
+                "Content-Type: text/plain",
+                f"Content-Length: {len(body)}",
+                "",
+                body,
+            ]
+            payload = "\r\n".join(lines)
+            code, reason, raw = self._send_and_recv(sock, payload)
+            return {
+                "ok": code == 200,
+                "status": code,
+                "reason": reason,
+                "raw": raw,
+                "od_uri": od_uri,
+            }
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
     def monitor(
         self,
         owner_id: str,

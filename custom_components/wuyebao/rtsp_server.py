@@ -90,6 +90,68 @@ class VideoSessionManager:
         async with self._lock:
             return await self._start_locked(gate_id)
 
+    async def start_household(
+        self,
+        key: str,
+        uri: str,
+        client,
+    ) -> SipMonitorCall | None:
+        """Start a 户户通 call to the owner's indoor unit (RM-... URI).
+
+        Any previous household session with the same key is stopped first so
+        every button press is a fresh intercom call.  The established media
+        session is stored under ``key`` and served by the RTSP server at
+        ``rtsp://127.0.0.1:8556/<key>`` (e.g. /rm-2702).
+        """
+        async with self._lock:
+            old = self._sessions.pop(key, None)
+            if old is not None:
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(old.stop), 15.0)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # make sure the SIP JWT is fresh before placing the call
+            try:
+                await client.ensure_sip_token()
+            except Exception as err:
+                _LOGGER.warning("Failed to refresh SIP token for 户户通: %s", err)
+
+            if not getattr(client, "sip_jwt", None) or not getattr(
+                client, "owner_id", None
+            ):
+                return None
+
+            call = SipMonitorCall(
+                user=client.username,
+                jwt=client.sip_jwt,
+                sid=client.sip_sid,
+                gt_uri=uri,
+                display_name=f"户户通 {uri}",
+            )
+            _LOGGER.info("户户通 calling %s", uri)
+            try:
+                result = await asyncio.to_thread(call.start)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.error("户户通 call start EXCEPTION: %s", exc)
+                result = {"ok": False, "status": 0, "error": f"EXCEPTION {exc}"}
+                await asyncio.to_thread(call.stop)
+            if not result.get("ok"):
+                _LOGGER.error("户户通 call start failed: %s", result)
+                await asyncio.to_thread(call.stop)
+                return None
+            got_video = await asyncio.to_thread(call.wait_for_video, 45.0)
+            if not got_video:
+                _LOGGER.warning(
+                    "户户通 no video media | %s | nals=%s",
+                    getattr(call, "last_debug", "") or "no-debug",
+                    dict(getattr(call, "_nal_stats", {})),
+                )
+                await asyncio.to_thread(call.stop)
+                return None
+            self._sessions[key] = call
+            return call
+
     async def _start_locked(self, gate_id: str) -> SipMonitorCall | None:
         """Start (or reuse) the monitor session for gate_id. Caller holds the lock."""
         sess = self._sessions.get(gate_id)
