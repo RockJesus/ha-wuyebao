@@ -40,6 +40,14 @@ class VideoSessionManager:
         self._watchdog_task: asyncio.Task | None = None
         self._restarting: set[str] = set()
         self._restart_tasks: set[asyncio.Task] = set()
+        # DESCRIBE/PLAY background session-starts (shielded, may outlive the
+        # client request); cancelled on shutdown so unload never waits on them
+        self._pending_tasks: set[asyncio.Task] = set()
+
+    def _track(self, task: asyncio.Task) -> asyncio.Task:
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+        return task
 
     def register_gate(self, gate_id: str, gate: dict, client) -> None:
         self._gates[gate_id] = {"gate": gate, "client": client}
@@ -264,6 +272,9 @@ class VideoSessionManager:
         lock acquisition and each session stop are bounded by timeouts.
         """
         await self.stop_watchdog()
+        for t in list(self._pending_tasks):
+            t.cancel()
+        self._pending_tasks.clear()
         sessions: list = []
         try:
             await asyncio.wait_for(self._lock.acquire(), 3.0)
@@ -320,6 +331,8 @@ class RtspServer:
         self._host = host
         self._port = port
         self._server: asyncio.AbstractServer | None = None
+        # active RTSP client connections; closed forcefully on stop()
+        self._connections: set[RtspClientConnection] = set()
 
     async def start(self) -> bool:
         try:
@@ -335,14 +348,28 @@ class RtspServer:
     async def stop(self) -> None:
         if self._server:
             self._server.close()
-            await self._server.wait_closed()
+            # Force-close active RTSP client connections.  wait_closed()
+            # waits for EVERY connection handler to finish, and a client
+            # that keeps its socket open (live monitoring playing) blocks
+            # config-entry unload forever ("reload has no response").
+            for conn in list(self._connections):
+                conn.abort()
+            self._connections.clear()
+            try:
+                await asyncio.wait_for(self._server.wait_closed(), 5.0)
+            except asyncio.TimeoutError:
+                _LOGGER.warning("RTSP server did not stop within 5s - forcing")
             self._server = None
 
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         client = RtspClientConnection(self._manager, reader, writer)
-        await client.run()
+        self._connections.add(client)
+        try:
+            await client.run()
+        finally:
+            self._connections.discard(client)
 
 
 class RtspClientConnection:
@@ -381,6 +408,14 @@ class RtspClientConnection:
                 self._writer.close()
             except Exception:
                 pass
+
+    def abort(self) -> None:
+        """Force-close the client socket (used on server stop).  The blocked
+        read in run() raises IncompleteReadError and teardown runs."""
+        try:
+            self._writer.close()
+        except Exception:
+            pass
 
     async def _read_request(self) -> dict | None:
         header = self._pending
@@ -465,7 +500,9 @@ class RtspClientConnection:
             # task is shielded so the timeout does NOT cancel it) and the
             # client's automatic reconnect (go2rtc/ffmpeg) will find it
             # already established (IDLE_STOP_AFTER keeps it alive).
-            task = asyncio.ensure_future(self._manager.get_or_start(gate_id))
+            task = self._manager._track(
+                asyncio.ensure_future(self._manager.get_or_start(gate_id))
+            )
             try:
                 sess = await asyncio.wait_for(asyncio.shield(task), 25.0)
             except asyncio.TimeoutError:
@@ -569,8 +606,10 @@ class RtspClientConnection:
             # the client's reconnect keeps the flow alive.
             sess = self._manager.get_session(self._gate_id)
             if sess is None:
-                task = asyncio.ensure_future(
-                    self._manager.get_or_start(self._gate_id)
+                task = self._manager._track(
+                    asyncio.ensure_future(
+                        self._manager.get_or_start(self._gate_id)
+                    )
                 )
                 try:
                     sess = await asyncio.wait_for(asyncio.shield(task), 25.0)
