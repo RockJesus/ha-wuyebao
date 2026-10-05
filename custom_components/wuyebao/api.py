@@ -337,6 +337,16 @@ class WuYeBaoClient:
         Strict matching by deviceNumber + devicesType. No fallback to other
         devices' records (avoids showing wrong door images).
         """
+        info = await self.get_latest_call_info(gate)
+        return info.get("url") if info else None
+
+    async def get_latest_call_info(self, gate: dict[str, Any]) -> dict[str, Any] | None:
+        """Latest visitor-call record matched to this gate.
+
+        Call records are created when a visitor presses the doorbell, so
+        the imageUrl is exactly the "last visitor snapshot" for that door.
+        Returns {"url", "time", "deviceNumber", "devicesType", "callType"}.
+        """
         try:
             calls = await self.get_calls(page=1, page_size=20)
         except Exception as err:
@@ -355,7 +365,20 @@ class WuYeBaoClient:
             if call_dev == device_number and call_type == gate_type:
                 url = call.get("imageUrl")
                 if url:
-                    return str(url)
+                    # the call records carry the timestamp under several
+                    # possible keys depending on the app version
+                    ts = None
+                    for key in ("createTime", "callTime", "time", "visitTime", "createDate"):
+                        if call.get(key):
+                            ts = call[key]
+                            break
+                    return {
+                        "url": str(url),
+                        "time": ts,
+                        "deviceNumber": device_number,
+                        "devicesType": gate_type,
+                        "callType": call.get("callType"),
+                    }
 
         return None
 
