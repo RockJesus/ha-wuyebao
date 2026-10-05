@@ -14,6 +14,7 @@ Key facts (from packet capture):
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -155,6 +156,19 @@ def _parse_sdp_answer(sdp: str) -> dict:
             try:
                 port = int(line.split(":")[1].split(" ")[0])
                 info[f"{current}_rtcp"] = port
+            except (ValueError, IndexError):
+                pass
+        elif line.lower().startswith("a=fmtp:") and "sprop-parameter-sets=" in line:
+            # Out-of-band H264 parameter sets carried in the answer SDP:
+            # a=fmtp:97 packetization-mode=1;profile-level-id=...;
+            #   sprop-parameter-sets=Z0IAB... ,aM4B...
+            try:
+                sprop = line.split("sprop-parameter-sets=", 1)[1].split(";", 1)[0].strip()
+                parts = sprop.split(",")
+                if parts and parts[0].strip():
+                    info["sps_b64"] = parts[0].strip()
+                if len(parts) > 1 and parts[1].strip():
+                    info["pps_b64"] = parts[1].strip()
             except (ValueError, IndexError):
                 pass
     return info
@@ -1023,6 +1037,22 @@ class SipMonitorCall:
         self.media_audio_port = info.get("audio_port")
         self.media_video_rtcp = info.get("video_rtcp")
         self.media_audio_rtcp = info.get("audio_rtcp")
+        # Out-of-band H264 parameter sets carried in the answer SDP.
+        # Some gates (e.g. the north gate GT-840-1-0-0-0-b) stream IDR-only
+        # RTP with no in-band SPS/PPS, so decode them from sprop now.
+        sps_b64 = info.get("sps_b64")
+        pps_b64 = info.get("pps_b64")
+        if sps_b64 or pps_b64:
+            try:
+                with self._sps_pps_lock:
+                    if sps_b64 and self.sps is None:
+                        self.sps = base64.b64decode(sps_b64)
+                    if pps_b64 and self.pps is None:
+                        self.pps = base64.b64decode(pps_b64)
+                if self.sps or self.pps:
+                    self._dbg("SPS/PPS extracted from answer SDP sprop")
+            except Exception as exc:  # noqa: BLE001 - diagnostics only
+                self._dbg(f"sprop decode failed: {exc}")
         _LOGGER.info(
             "Monitor session for %s: media=%s video=%s(rtcp=%s) audio=%s(rtcp=%s)",
             self.gt_uri, self.media_ip, self.media_video_port,
