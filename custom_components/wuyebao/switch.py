@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN
 from .api import WuYeBaoClient
@@ -16,7 +17,8 @@ from .api import WuYeBaoClient
 _LOGGER = logging.getLogger(__name__)
 
 # Shared state store under hass.data[DOMAIN]["auto_open"]:
-#   {gate_id: bool}  - per-gate "visitor auto open" switch state.
+#   {entry_id: {gate_id: bool}}  - per-gate "visitor auto open" switch state,
+#   isolated per config entry so multiple users never share each other's state.
 # Written by the switch entities, read by the call poller in __init__.py.
 AUTO_OPEN_KEY = "auto_open"
 
@@ -36,7 +38,8 @@ async def async_setup_entry(
         _LOGGER.error("Failed to get gates for switches: %s", err)
         gates = []
 
-    state: dict[str, bool] = hass.data[DOMAIN].setdefault(AUTO_OPEN_KEY, {})
+    store: dict[str, dict[str, bool]] = hass.data[DOMAIN].setdefault(AUTO_OPEN_KEY, {})
+    state: dict[str, bool] = store.setdefault(entry.entry_id, {})
 
     entities = [
         WuYeBaoAutoOpenSwitch(client, entry.entry_id, gate, state) for gate in gates
@@ -44,11 +47,14 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class WuYeBaoAutoOpenSwitch(SwitchEntity):
+class WuYeBaoAutoOpenSwitch(RestoreEntity, SwitchEntity):
     """Visitor auto-open switch for one gate.
 
     When ON, the integration's call poller opens this door automatically as
     soon as a new doorbell call for the gate is detected.
+
+    The switch state is persisted via RestoreEntity so it survives HAOS
+    restarts (restored on async_added_to_hass).
     """
 
     _attr_has_entity_name = True
@@ -79,6 +85,12 @@ class WuYeBaoAutoOpenSwitch(SwitchEntity):
             manufacturer="深圳家和云联",
             model="物业宝 门禁设备",
         )
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the persisted switch state (survives HAOS restarts)."""
+        last = await self.async_get_last_state()
+        if last is not None and last.state in ("on", "off"):
+            self._state[self._gid] = last.state == "on"
 
     def _build_device_name(self) -> str:
         """Build a human-friendly device name from gate data (same as lock.py)."""

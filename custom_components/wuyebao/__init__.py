@@ -124,24 +124,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ):
             ent_reg.async_remove(entity_id)
 
-    # Live video: RTSP server + session manager (one per integration instance)
-    manager = VideoSessionManager()
-    rtsp_server = RtspServer(manager)
-    hass.data[DOMAIN]["video_manager"] = manager
-    hass.data[DOMAIN]["rtsp_server"] = rtsp_server
-    if not await rtsp_server.start():
-        _LOGGER.warning(
-            "RTSP server could not bind %s:%s - live camera streams disabled",
-            rtsp_server._host,
-            rtsp_server._port,
-        )
-    else:
-        # Watchdog: rebuild monitor sessions whose RTP stream went silent
-        # (gates stop pushing video after ~30s -> picture freezes).
-        manager.start_watchdog()
+    # Live video: RTSP server + session manager.  Shared across config
+    # entries (multiple user accounts) so the second entry reuses the already
+    # bound server instead of fighting for the same port.
+    manager: VideoSessionManager | None = hass.data[DOMAIN].get("video_manager")
+    if manager is None:
+        manager = VideoSessionManager()
+        rtsp_server = RtspServer(manager)
+        hass.data[DOMAIN]["video_manager"] = manager
+        hass.data[DOMAIN]["rtsp_server"] = rtsp_server
+        if not await rtsp_server.start():
+            _LOGGER.warning(
+                "RTSP server could not bind %s:%s - live camera streams disabled",
+                rtsp_server._host,
+                rtsp_server._port,
+            )
+        else:
+            # Watchdog: rebuild monitor sessions whose RTP stream went silent
+            # (gates stop pushing video after ~30s -> picture freezes).
+            manager.start_watchdog()
 
-    # Visitor auto-open: per-gate switch state + call poller.
-    auto_open_state: dict[str, bool] = hass.data[DOMAIN].setdefault("auto_open", {})
+    # Visitor auto-open: per-gate switch state (isolated per config entry so
+    # multiple users never share state) + call poller.
+    auto_open_store: dict[str, dict[str, bool]] = hass.data[DOMAIN].setdefault("auto_open", {})
+    auto_open_state: dict[str, bool] = auto_open_store.setdefault(entry.entry_id, {})
     try:
         poll_gates = await client.get_gates()
     except Exception as err:  # noqa: BLE001
