@@ -812,6 +812,10 @@ class SipMonitorCall:
                 if self.sps is not None or self.pps is not None:
                     return True
             time.sleep(0.2)
+        _LOGGER.error(
+            "wait_for_video timeout %s: pkts=%d nals=%s",
+            self.gt_uri, getattr(self, "_video_packet_count", 0), dict(self._nal_stats),
+        )
         return False
 
     # ------------------------------------------------------------------
