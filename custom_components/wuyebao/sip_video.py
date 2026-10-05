@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import socket
+from collections import defaultdict
 import struct
 import threading
 import time
@@ -241,6 +242,9 @@ class SipMonitorCall:
         # HA without log-level access).
         self.debug_events: list[str] = []
         self.last_debug: str = ""
+        # H264 NAL type histogram of received RTP (diagnostics): keys 7=SPS
+        # 8=PPS 5=IDR 1=slice 0=other; 28=FU-A resolved into its real type.
+        self._nal_stats: dict[int, int] = defaultdict(int)
 
     def _dbg(self, ev: str) -> None:
         self.debug_events.append(f"{time.time():.1f} {ev}")
@@ -660,11 +664,17 @@ class SipMonitorCall:
                 if payload:
                     nal_type = payload[0] & 0x1F
                     if nal_type == 7 and len(payload) >= 4:  # SPS
+                        self._nal_stats[7] += 1
                         with self._sps_pps_lock:
                             self.sps = payload
                     elif nal_type == 8 and len(payload) >= 3:  # PPS
+                        self._nal_stats[8] += 1
                         with self._sps_pps_lock:
                             self.pps = payload
+                    elif nal_type == 5:  # IDR
+                        self._nal_stats[5] += 1
+                    elif nal_type == 1:  # non-IDR slice
+                        self._nal_stats[1] += 1
                     elif nal_type == 28 and len(payload) >= 2:  # FU-A
                         fu_header = payload[1]
                         start_bit = (fu_header >> 7) & 0x01
@@ -672,15 +682,21 @@ class SipMonitorCall:
                             nri = (payload[0] >> 5) & 0x03
                             real_type = fu_header & 0x1F
                             if real_type == 7:  # SPS in FU-A
+                                self._nal_stats[7] += 1
                                 nal = bytes([(nri << 5) | 7]) + payload[2:]
                                 with self._sps_pps_lock:
                                     if len(nal) >= 4:
                                         self.sps = nal
                             elif real_type == 8:  # PPS in FU-A
+                                self._nal_stats[8] += 1
                                 nal = bytes([(nri << 5) | 8]) + payload[2:]
                                 with self._sps_pps_lock:
                                     if len(nal) >= 3:
                                         self.pps = nal
+                            elif real_type in (1, 5):  # VCL slice in FU-A
+                                self._nal_stats[real_type] += 1
+                    else:
+                        self._nal_stats[0] += 1  # other NAL types
 
                 # Forward raw RTP to RTSP subscribers
                 with self._lock:
@@ -1177,6 +1193,11 @@ class SipMonitorCall:
         )
         if not sustained:
             self._dbg(f"confirm window end: pkts={count} last_pkt_age={time.time()-last_pkt:.1f}s -> FAIL")
+            _LOGGER.error(
+                "Monitor %s no sustained video: media=%s:%s count=%d nals=%s",
+                self.gt_uri, self.media_ip, self.media_video_port, count,
+                dict(self._nal_stats),
+            )
             try:
                 self._bye()
             except Exception:
