@@ -1066,13 +1066,13 @@ class SipMonitorCall:
         # 183 early-media gate that rings then answers streams only a few
         # probe packets (the app abandons those attempts too - only the
         # attempt where the device answers straight away streams video).
-        # The confirmation window is LONG (15s) on purpose: wall gates push
-        # video immediately but unit doors take 10-30s after the answer to
-        # start their RTP stream - a short window (5s) misjudged those as
-        # "no media", tore the call down and retried forever.  A strong
-        # stream (>= 4x min_packets) still exits early.
+        # The confirmation window is LONG (45s) on purpose: wall gates push
+        # video immediately but unit doors / north gate take 10-30s after
+        # the answer to start their RTP stream - a short window (15s)
+        # misjudged those as "no media", tore the call down and retried
+        # forever.  A strong stream (>= 4x min_packets) still exits early.
         min_packets = getattr(self, "min_video_packets", 10)
-        deadline = time.time() + 15.0
+        deadline = time.time() + 45.0
         last_pkt = 0.0
         count = 0
         while time.time() < deadline:
@@ -1080,13 +1080,14 @@ class SipMonitorCall:
             if c > count:
                 count = c
                 last_pkt = time.time()
-            if count >= min_packets and time.time() - last_pkt > 1.2:
-                break  # stream went quiet -> early-media trickle, retry
             if count >= min_packets * 4:
                 break  # strong real stream
             time.sleep(0.1)
+        # success only if media is (still) flowing at window end, or the
+        # strong-stream threshold was crossed; a trickle that stopped
+        # (ringtone probes) is treated as failure so we retry.
         sustained = count >= min_packets and (
-            time.time() - last_pkt <= 1.2 or count >= min_packets * 4
+            (time.time() - last_pkt) <= 3.0 or count >= min_packets * 4
         )
         if not sustained:
             try:
