@@ -709,6 +709,32 @@ class SipMonitorCall:
                                         self.pps = nal
                             elif real_type in (1, 5):  # VCL slice in FU-A
                                 self._nal_stats[real_type] += 1
+                    elif nal_type == 24 and len(payload) >= 3:  # STAP-A
+                        # Aggregate packet: sequence of [2B len][NAL unit].
+                        # Some gates (e.g. north gate GT-840-1-0-0-0-b) wrap
+                        # SPS/PPS+IDR into STAP-A instead of bare NALs.
+                        self._nal_stats[24] += 1
+                        i = 1
+                        while i + 2 < len(payload):
+                            nalu_len = int.from_bytes(payload[i:i + 2], "big")
+                            i += 2
+                            if i + nalu_len > len(payload):
+                                break
+                            sub = payload[i:i + nalu_len]
+                            i += nalu_len
+                            if not sub:
+                                continue
+                            sub_type = sub[0] & 0x1F
+                            if sub_type == 7 and len(sub) >= 4:
+                                self._nal_stats[7] += 1
+                                with self._sps_pps_lock:
+                                    self.sps = sub
+                            elif sub_type == 8 and len(sub) >= 3:
+                                self._nal_stats[8] += 1
+                                with self._sps_pps_lock:
+                                    self.pps = sub
+                            elif sub_type in (1, 5):
+                                self._nal_stats[sub_type] += 1
                     else:
                         self._nal_stats[0] += 1  # other NAL types
 
