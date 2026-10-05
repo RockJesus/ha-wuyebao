@@ -122,6 +122,22 @@ class VideoSessionManager:
         # last attempt" behaviour of the official app.
         backoffs = (3, 5, 8, 12)
         for attempt in range(5):
+            # The app activates the device before placing the media call:
+            # it sends the monitor SIP MESSAGE so the gate enters an
+            # answerable state. South wall gate accepts a direct INVITE,
+            # but north gate and unit doors answer "486 Busy Here" / answer
+            # without pushing media unless they have been activated first.
+            # Best-effort: if the MESSAGE fails (some devices reject it),
+            # still try the INVITE.
+            try:
+                await client.start_monitor(gate)
+                _LOGGER.info("Monitor MESSAGE sent for %s (%s)", gate_id, gt_uri)
+            except Exception as err:
+                _LOGGER.warning(
+                    "Monitor MESSAGE failed for %s: %s (continuing)", gate_id, err
+                )
+            await asyncio.sleep(1.5)
+
             call = SipMonitorCall(
                 user=client.username,
                 jwt=client.sip_jwt,
