@@ -8,7 +8,7 @@
   "documentation": "https://github.com/RockJesus/ha-wuyebao",
   "issue_tracker": "https://github.com/RockJesus/ha-wuyebao/issues",
   "requirements": [],
-  "version": "7.0.1",
+  "version": "7.0.2",
   "iot_class": "cloud_polling",
   "loggers": [
     "custom_components.wuyebao"
