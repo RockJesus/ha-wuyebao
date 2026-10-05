@@ -346,6 +346,69 @@ class WuYeBaoClient:
         info = await self.get_latest_call_info(gate)
         return info.get("url") if info else None
 
+    def _call_matches_gate(self, call: dict[str, Any], gate: dict[str, Any]) -> bool:
+        """True if a call record belongs to the given gate.
+
+        Call records share ``deviceNumber`` (every unit door is numbered "1")
+        so deviceNumber alone is NOT unique:
+          1. strong match by unitId  (unit doors: call.unitId == gate.unitId)
+          2. fallback by buildingId + deviceNumber
+          3. plain deviceNumber match only for gates without unit/building ids
+             (wall gates a/b are unique).
+        """
+        device_number = str(gate.get("deviceNumber", ""))
+        gate_type = str(gate.get("type", ""))
+        call_dev = str(call.get("deviceNumber", ""))
+        call_type = str(call.get("devicesType", ""))
+        if call_dev != device_number or call_type != gate_type:
+            return False
+        gate_unit_id = str(gate.get("unitId", ""))
+        gate_building_id = str(gate.get("buildingId", ""))
+        call_unit_id = str(call.get("unitId", ""))
+        call_building_id = str(call.get("buildingId", ""))
+        if gate_unit_id and call_unit_id:
+            return call_unit_id == gate_unit_id
+        if gate_building_id and call_building_id:
+            return call_building_id == gate_building_id
+        return True
+
+    def _call_token(self, call: dict[str, Any]) -> str:
+        """Stable token identifying one specific call event (dedupe key).
+
+        The token must stay identical while the same call is re-fetched and
+        change as soon as a NEW call for the same gate appears.
+        """
+        for key in ("callId", "id", "createTime", "callTime", "time", "visitTime", "createDate"):
+            if call.get(key):
+                return f"{call.get('deviceNumber', '')}:{call[key]}"
+        return f"{call.get('deviceNumber', '')}:{call.get('imageUrl', '')}"
+
+    async def get_latest_calls_per_gate(
+        self, gates: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """Fetch call records ONCE and return {gate_id: newest call} per gate.
+
+        Shares the exact matching rules with the visitor camera.  Used by the
+        visitor auto-open poller so a single API call covers every gate.
+        """
+        try:
+            calls = await self.get_calls(page=1, page_size=20)
+        except Exception as err:
+            _LOGGER.warning("Failed to get call records: %s", err)
+            return {}
+        if not calls:
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for gate in gates:
+            gate_id = str(
+                gate.get("id") or gate.get("uid") or gate.get("deviceNumber") or "unknown"
+            )
+            for call in calls:
+                if self._call_matches_gate(call, gate):
+                    result[gate_id] = call
+                    break
+        return result
+
     async def get_latest_call_info(self, gate: dict[str, Any]) -> dict[str, Any] | None:
         """Latest visitor-call record matched to this gate.
 

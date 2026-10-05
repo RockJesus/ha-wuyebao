@@ -1,7 +1,9 @@
 """The 物业宝 integration."""
 from __future__ import annotations
 
+import asyncio
 import logging
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -18,8 +20,66 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [
     Platform.LOCK,
     Platform.SENSOR,
+    Platform.SWITCH,
     Platform.CAMERA,
 ]
+
+# Visitor auto-open: poll call records and open doors whose switch is ON.
+CALL_POLL_INTERVAL = 3.0
+
+
+async def _visitor_call_poller(
+    hass: HomeAssistant,
+    client: WuYeBaoClient,
+    auto_open_state: dict[str, bool],
+    gates: list[dict[str, Any]],
+) -> None:
+    """Poll call records; auto-open gates whose "来访自动开门" switch is ON.
+
+    On startup the poller only learns the current call tokens (so an old call
+    is never re-triggered).  Afterwards, whenever a NEW call token appears for
+    a gate and that gate's switch is ON, the door is opened immediately.
+    """
+    _LOGGER.info("Visitor auto-open poller started for %d gates", len(gates))
+    seen: dict[str, str] = {}
+    while True:
+        try:
+            per_gate = await client.get_latest_calls_per_gate(gates)
+            for gid, call in per_gate.items():
+                token = client._call_token(call)
+                prev = seen.get(gid)
+                if prev is None:
+                    seen[gid] = token
+                    continue
+                if token != prev:
+                    seen[gid] = token
+                    if auto_open_state.get(gid):
+                        gate = next(
+                            (
+                                g
+                                for g in gates
+                                if str(
+                                    g.get("id")
+                                    or g.get("uid")
+                                    or g.get("deviceNumber")
+                                    or "unknown"
+                                )
+                                == gid
+                            ),
+                            None,
+                        )
+                        if gate is None:
+                            continue
+                        _LOGGER.info("Visitor call at gate %s -> auto open", gid)
+                        try:
+                            await client.open_door_sip(gate)
+                        except Exception as err:  # noqa: BLE001
+                            _LOGGER.warning("Auto-open gate %s failed: %s", gid, err)
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - polling must never die
+            _LOGGER.debug("Visitor call poll error: %s", err)
+        await asyncio.sleep(CALL_POLL_INTERVAL)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -80,6 +140,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # (gates stop pushing video after ~30s -> picture freezes).
         manager.start_watchdog()
 
+    # Visitor auto-open: per-gate switch state + call poller.
+    auto_open_state: dict[str, bool] = hass.data[DOMAIN].setdefault("auto_open", {})
+    try:
+        poll_gates = await client.get_gates()
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Failed to get gates for auto-open poller: %s", err)
+        poll_gates = []
+    poll_task = entry.async_create_background_task(
+        hass,
+        _visitor_call_poller(hass, client, auto_open_state, poll_gates),
+        "wuyebao-visitor-auto-open",
+    )
+    hass.data[DOMAIN]["visitor_poll_task"] = poll_task
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
@@ -88,6 +162,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        # stop the visitor auto-open poller
+        poll_task = hass.data[DOMAIN].get("visitor_poll_task")
+        if poll_task:
+            poll_task.cancel()
         # stop live video sessions / RTSP server
         rtsp_server = hass.data[DOMAIN].get("rtsp_server")
         manager = hass.data[DOMAIN].get("video_manager")
