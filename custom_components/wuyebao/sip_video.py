@@ -442,8 +442,13 @@ class SipMonitorCall:
         branch = _gen_branch()
         # The app ACKs the device contact from the response (m: header), not
         # the logical gt_uri@realm address, and routes via the Record-Route
-        # headers from the response.
+        # headers from the response.  Strip any angle brackets from the
+        # m: value: a bracketed URI is legal in a header value but NOT in
+        # the ACK request line - FreeSWITCH ignores a non-standard
+        # "ACK <sip:x@y> ..." request line and the media session never
+        # activates (north gate GT-b answered INVITE but streamed 0 RTP).
         target = self._remote_contact or f"sip:{self.gt_uri}@{SIP_REALM}"
+        target = target.strip().strip("<>")
         lines = [
             f"ACK {target} SIP/2.0",
             f"Via: SIP/2.0/TCP {self._local_ip}:5060;rport;branch={branch};alias",
@@ -830,7 +835,16 @@ class SipMonitorCall:
                 if not self._register():
                     last = {"ok": False, "status": 0, "error": "REGISTER failed"}
                     continue
-            last = self._start_attempt()
+            try:
+                last = self._start_attempt()
+            except Exception as exc:  # noqa: BLE001 - never let a retry thread die silently
+                _LOGGER.warning(
+                    "Monitor %s attempt %d/%d EXCEPTION: %s",
+                    self.gt_uri, attempt, max_attempts, exc,
+                )
+                last = {"ok": False, "status": 0, "error": f"EXCEPTION {exc}"}
+                self._reset_session()
+                continue
             if last.get("ok"):
                 return last
             _LOGGER.warning(
@@ -840,7 +854,6 @@ class SipMonitorCall:
         return last
 
     def _start_attempt(self) -> dict:
-        """Single INVITE attempt: INVITE -> ACK -> hole punch -> RTP receiver."""
         self._video_received = False
         self._video_packet_count = 0
         # bind RTP sockets BEFORE INVITE so the offer ports are listening.
