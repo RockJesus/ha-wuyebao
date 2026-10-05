@@ -20,15 +20,18 @@ _LOGGER = logging.getLogger(__name__)
 
 RTSP_HOST = "0.0.0.0"
 RTSP_PORT = 8556
-# How long a session with no RTSP clients is kept alive.  This is ONLY the
-# fallback for clients that drop the TCP connection without sending
-# TEARDOWN: a normal "stop live view" sends TEARDOWN and the session is
-# stopped immediately.  The short window exists so a transient reconnect
-# (HA stream / go2rtc retry) can reuse the already-established SIP call
-# instead of restarting the INVITE dance; once it expires the session is
-# torn down (BYE) and no requests are sent until the user opens the live
-# view again.
-IDLE_STOP_AFTER = 15  # seconds without RTSP clients -> BYE
+# Idle-stop policy (seconds without RTSP clients -> BYE):
+#  - IDLE_STOP_AFTER: session that HAS delivered media and is then closed.
+#    A normal "stop live view" sends TEARDOWN (immediate stop); this is the
+#    fallback for clients that drop TCP without TEARDOWN, so 15s is enough
+#    for a transient reconnect to reuse the established call.
+#  - IDLE_STOP_AFTER_WARMUP: session still waiting for the device's first
+#    media (unit doors can take 10-30s to push RTP after answering INVITE).
+#    The client's first DESCRIBE may time out and reconnect; keep the
+#    session for 2 minutes so the reconnect reuses the warming-up call
+#    instead of restarting the whole INVITE dance.
+IDLE_STOP_AFTER = 15  # seconds without RTSP clients after media flowed -> BYE
+IDLE_STOP_AFTER_WARMUP = 120  # seconds without clients while warming up -> BYE
 
 # Watchdog rebuild cooldown: when a connected client exists but the media
 # stream goes silent, the watchdog rebuilds the SIP session.  A stuck
@@ -141,8 +144,10 @@ class VideoSessionManager:
                 return None
             # wait for actual video RTP (SPS/PPS); retry on failure.
             # North gate / some devices take >10s to stream media after
-            # the 200 OK, so wait longer than the old 10s.
-            got_video = await asyncio.to_thread(call.wait_for_video, 25.0)
+            # the 200 OK (up to 30s observed), so wait generously: killing
+            # the call here just because the device is slow would make the
+            # client loop forever.
+            got_video = await asyncio.to_thread(call.wait_for_video, 60.0)
             if got_video:
                 self._sessions[gate_id] = call
                 return call
@@ -159,7 +164,10 @@ class VideoSessionManager:
     # freezes the picture; detect the silence and rebuild the session so
     # the live view continues without user interaction.
     # ------------------------------------------------------------------
-    SILENCE_THRESHOLD = 10.0  # seconds without video RTP -> rebuild
+    SILENCE_THRESHOLD = 10.0  # seconds without video RTP after media flowed -> rebuild
+    FIRST_MEDIA_WAIT = 60.0  # seconds to wait for the device's FIRST media
+    # before the watchdog considers the session stalled (unit doors answer
+    # INVITE but can take 10-30s to push RTP)
     WATCHDOG_INTERVAL = 3.0
 
     def start_watchdog(self) -> None:
@@ -203,14 +211,23 @@ class VideoSessionManager:
 
     async def _watchdog_tick(self) -> None:
         async with self._lock:
-            stalled = [
-                gid
-                for gid, sess in self._sessions.items()
-                if sess.subscriber_count() > 0
-                and not sess.is_stream_alive(self.SILENCE_THRESHOLD)
-            ]
             now = time.monotonic()
-            for gid in stalled:
+            stalled = []
+            for gid, sess in self._sessions.items():
+                if sess.subscriber_count() <= 0:
+                    continue
+                # A session that has never delivered media (still waiting
+                # for the device's first RTP) gets a long grace period;
+                # only a session that delivered media and then went silent
+                # is rebuilt quickly (frozen-picture recovery).
+                threshold = (
+                    self.SILENCE_THRESHOLD
+                    if sess.has_media()
+                    else self.FIRST_MEDIA_WAIT
+                )
+                if not sess.is_stream_alive(threshold):
+                    stalled.append((gid, threshold))
+            for gid, threshold in stalled:
                 if gid in self._restarting:
                     continue
                 # rebuild cooldown: a client that keeps reconnecting and
@@ -233,8 +250,8 @@ class VideoSessionManager:
                 sess = self._sessions.pop(gid, None)
                 if sess is not None:
                     _LOGGER.warning(
-                        "Monitor stream %s silent for %.0fs - rebuilding session",
-                        gid, self.SILENCE_THRESHOLD,
+                        "Monitor stream %s silent for %.0fs (media=%s) - rebuilding session",
+                        gid, threshold, sess.has_media(),
                     )
                     task = asyncio.ensure_future(self._restart(gid))
                     self._restart_tasks.add(task)
@@ -278,10 +295,12 @@ class VideoSessionManager:
         if sess is None:
             return
         sess.remove_subscriber(s, target)
-        # schedule idle stop
+        # schedule idle stop: long warm-up window while the device has not
+        # pushed media yet (unit doors), short window after media flowed
+        delay = IDLE_STOP_AFTER if sess.has_media() else IDLE_STOP_AFTER_WARMUP
         loop = asyncio.get_event_loop()
         loop.call_later(
-            IDLE_STOP_AFTER,
+            delay,
             lambda gid=gate_id: asyncio.ensure_future(self._idle_stop(gid)),
         )
 
@@ -291,9 +310,10 @@ class VideoSessionManager:
             return
         sess.remove_tcp_subscriber(loop, writer, channel)
         # schedule idle stop
+        delay = IDLE_STOP_AFTER if sess.has_media() else IDLE_STOP_AFTER_WARMUP
         loop = asyncio.get_event_loop()
         loop.call_later(
-            IDLE_STOP_AFTER,
+            delay,
             lambda gid=gate_id: asyncio.ensure_future(self._idle_stop(gid)),
         )
 
