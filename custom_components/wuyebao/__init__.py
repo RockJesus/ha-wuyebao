@@ -55,7 +55,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if (
             ent.config_entry_id == entry.entry_id
             and ent.unique_id
-            and ent.unique_id.startswith(f"{entry.entry_id}_monitor_")
+            and (
+                ent.unique_id.startswith(f"{entry.entry_id}_monitor_")
+                # legacy "流地址" sensors removed in 6.6.8 (RTSP URL now
+                # exposed as an attribute on the 实时监控 camera entity)
+                or ent.unique_id.startswith(f"{entry.entry_id}_stream_")
+            )
         ):
             ent_reg.async_remove(entity_id)
 
@@ -70,6 +75,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             rtsp_server._host,
             rtsp_server._port,
         )
+    else:
+        # Watchdog: rebuild monitor sessions whose RTP stream went silent
+        # (gates stop pushing video after ~30s -> picture freezes).
+        manager.start_watchdog()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
