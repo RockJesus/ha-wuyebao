@@ -73,8 +73,12 @@ async def async_setup_entry(
         _LOGGER.error("Failed to get gates for sensors: %s", err)
         gates = []
     entities.extend(
-        WuYeBaoGateStreamSensor(client, entry.entry_id, gate, rtsp_host)
+        sensor
         for gate in gates
+        for sensor in (
+            WuYeBaoGateStreamSensor(client, entry.entry_id, gate, rtsp_host),
+            WuYeBaoGateIdSensor(client, entry.entry_id, gate),
+        )
     )
 
     async_add_entities(entities)
@@ -107,7 +111,12 @@ async def _retry_add_sensors(
             continue
         _LOGGER.info("Retry sensors: adding %d gate sensors", len(gates))
         async_add_entities(
-            WuYeBaoGateStreamSensor(client, entry_id, gate, rtsp_host) for gate in gates
+            sensor
+            for gate in gates
+            for sensor in (
+                WuYeBaoGateStreamSensor(client, entry_id, gate, rtsp_host),
+                WuYeBaoGateIdSensor(client, entry_id, gate),
+            )
         )
         return
 
@@ -176,13 +185,52 @@ class WuYeBaoUserSensor(SensorEntity):
         }
 
 
-class WuYeBaoGateStreamSensor(SensorEntity):
-    """Gate-ID sensor attached to each gate device.
+def _build_gate_device_name(client: WuYeBaoClient, gate: dict[str, Any]) -> str:
+    """Build a human-friendly device name from gate data (same as lock.py)."""
+    alias = gate.get("alias", "")
+    if alias:
+        return alias
+    community = gate.get("communityName") or client.community_name or ""
+    area = gate.get("areaName", "")
+    building = gate.get("buildingName", "")
+    unit = gate.get("unitName", "")
+    device_number = gate.get("deviceNumber", "")
+    gate_type = gate.get("type", "")
+    parts = []
+    if community:
+        parts.append(community)
+    if area:
+        parts.append(area)
+    if building:
+        parts.append(building)
+    if unit:
+        parts.append(unit)
+    if gate_type == "wall":
+        parts.append("围墙门")
+    if device_number:
+        parts.append(f"门口机{device_number}")
+    return " ".join(parts) if parts else f"门禁-{device_number or gate.get('id', 'unknown')}"
 
-    Exposes the stable gate id used by the SIP monitor / door unlock, handy
-    for automations and diagnostics (e.g. building rtsp://host:8556/<gate-id>
-    streams).  The device is shared with the lock/camera entities of the same
-    gate so it appears mounted under the gate device.
+
+def _gate_device_info(client: WuYeBaoClient, entry_id: str, gate: dict[str, Any]) -> DeviceInfo:
+    """Device info matching lock.py / camera.py so entities merge under the gate device."""
+    gate_id = str(
+        gate.get("id") or gate.get("uid") or gate.get("deviceNumber") or "unknown"
+    )
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"{entry_id}_{gate_id}")},
+        name=_build_gate_device_name(client, gate),
+        manufacturer="深圳家和云联",
+        model="物业宝 门禁设备",
+    )
+
+
+class WuYeBaoGateStreamSensor(SensorEntity):
+    """Stream-address sensor attached to each gate device.
+
+    Exposes the RTSP stream address (rtsp://<host>:8556/<gate-id>) for
+    go2rtc / ffmpeg.  The device is shared with the lock/camera entities of
+    the same gate so it appears mounted under the gate device.
     """
 
     _attr_has_entity_name = True
@@ -208,38 +256,7 @@ class WuYeBaoGateStreamSensor(SensorEntity):
         self._attr_unique_id = f"{entry_id}_gate_{gate_id}_gateid"
         # Same identifiers as lock.py / camera.py so this sensor mounts on the
         # gate device instead of creating a new one.
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"{entry_id}_{gate_id}")},
-            name=self._build_device_name(),
-            manufacturer="深圳家和云联",
-            model="物业宝 门禁设备",
-        )
-
-    def _build_device_name(self) -> str:
-        """Build a human-friendly device name from gate data (same as lock.py)."""
-        alias = self._gate.get("alias", "")
-        if alias:
-            return alias
-        community = self._gate.get("communityName") or self._client.community_name or ""
-        area = self._gate.get("areaName", "")
-        building = self._gate.get("buildingName", "")
-        unit = self._gate.get("unitName", "")
-        device_number = self._gate.get("deviceNumber", "")
-        gate_type = self._gate.get("type", "")
-        parts = []
-        if community:
-            parts.append(community)
-        if area:
-            parts.append(area)
-        if building:
-            parts.append(building)
-        if unit:
-            parts.append(unit)
-        if gate_type == "wall":
-            parts.append("围墙门")
-        if device_number:
-            parts.append(f"门口机{device_number}")
-        return " ".join(parts) if parts else f"门禁-{device_number or self._gate.get('id', 'unknown')}"
+        self._attr_device_info = _gate_device_info(client, entry_id, gate)
 
     @property
     def native_value(self) -> str:
@@ -254,6 +271,58 @@ class WuYeBaoGateStreamSensor(SensorEntity):
             "rtsp_url": self._rtsp_url,
             "rtsp_host": self._rtsp_host,
             "rtsp_port": RTSP_PORT,
+            "gate_uid": self._gate.get("uid"),
+            "device_number": self._gate.get("deviceNumber"),
+            "gate_type": self._gate.get("type"),
+            "building_name": self._gate.get("buildingName"),
+            "unit_name": self._gate.get("unitName"),
+            "area_name": self._gate.get("areaName"),
+            "community_name": self._gate.get("communityName"),
+        }
+
+
+class WuYeBaoGateIdSensor(SensorEntity):
+    """Gate-ID sensor attached to each gate device.
+
+    Exposes the stable gate id used by the SIP monitor / door unlock, handy
+    for automations and diagnostics (e.g. building rtsp://host:8556/<gate-id>
+    streams).  Mounted on the same gate device as the stream sensor / lock /
+    cameras.
+    """
+
+    _attr_has_entity_name = True
+    _attr_name = "gate-id"
+    _attr_icon = "mdi:identifier"
+    _attr_entity_registry_enabled_default = True
+
+    def __init__(
+        self,
+        client: WuYeBaoClient,
+        entry_id: str,
+        gate: dict[str, Any],
+    ) -> None:
+        """Initialize the sensor."""
+        self._client = client
+        self._gate = gate
+        gate_id = str(
+            gate.get("id") or gate.get("uid") or gate.get("deviceNumber") or "unknown"
+        )
+        self._gate_id = gate_id
+        self._attr_unique_id = f"{entry_id}_gate_{gate_id}_id"
+        # Same identifiers as lock.py / camera.py so this sensor mounts on the
+        # gate device instead of creating a new one.
+        self._attr_device_info = _gate_device_info(client, entry_id, gate)
+
+    @property
+    def native_value(self) -> str:
+        """Return the stable gate id for this gate."""
+        return self._gate_id
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        return {
+            "rtsp_url": f"rtsp://127.0.0.1:{RTSP_PORT}/{self._gate_id}",
             "gate_uid": self._gate.get("uid"),
             "device_number": self._gate.get("deviceNumber"),
             "gate_type": self._gate.get("type"),
