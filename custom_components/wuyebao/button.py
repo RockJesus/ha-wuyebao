@@ -16,6 +16,16 @@ from .api import WuYeBaoClient, WuYeBaoApiError
 
 _LOGGER = logging.getLogger(__name__)
 
+# Keep strong references to backfill tasks so they are not garbage-collected.
+_BACKFILL_TASKS: list[asyncio.Task] = []
+
+
+def _schedule_backfill(coro: Any) -> None:
+    """Schedule a gate-list backfill coroutine and keep it alive."""
+    task = asyncio.ensure_future(coro)
+    _BACKFILL_TASKS.append(task)
+    task.add_done_callback(_BACKFILL_TASKS.remove)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -54,7 +64,7 @@ async def async_setup_entry(
         # Transient API hiccup right after HA restart: retry later so the
         # per-gate elevator buttons are created once the cached list becomes
         # available (the two hub buttons above are always created).
-        hass.async_create_task(
+        _schedule_backfill(
             _retry_add_buttons(hass, client, entry.entry_id, async_add_entities)
         )
 
@@ -66,22 +76,24 @@ async def _retry_add_buttons(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Re-add elevator button entities after a transient empty gate list."""
-    await asyncio.sleep(45)
-    try:
-        gates = await client.ensure_gates()
-    except Exception as err:  # noqa: BLE001
-        _LOGGER.warning("Retry buttons: failed to fetch gates: %s", err)
+    for delay in (45, 120, 300):
+        await asyncio.sleep(delay)
+        try:
+            gates = await client.ensure_gates()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Retry buttons: failed to fetch gates: %s", err)
+            continue
+        if not gates:
+            _LOGGER.warning("Retry buttons: gate list still empty (delay %ss)", delay)
+            continue
+        entities = [
+            WuYeBaoElevatorButton(client, entry_id, gate)
+            for gate in gates
+            if gate.get("type") == "outdoor"
+        ]
+        _LOGGER.info("Retry buttons: adding %d elevator buttons", len(entities))
+        async_add_entities(entities)
         return
-    if not gates:
-        _LOGGER.warning("Retry buttons: gate list still empty, skipping")
-        return
-    entities = [
-        WuYeBaoElevatorButton(client, entry_id, gate)
-        for gate in gates
-        if gate.get("type") == "outdoor"
-    ]
-    _LOGGER.info("Retry buttons: adding %d elevator buttons", len(entities))
-    async_add_entities(entities)
 
 
 def _gate_id(gate: dict[str, Any]) -> str:

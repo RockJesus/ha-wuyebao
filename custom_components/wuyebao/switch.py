@@ -17,6 +17,16 @@ from .api import WuYeBaoClient
 
 _LOGGER = logging.getLogger(__name__)
 
+# Keep strong references to backfill tasks so they are not garbage-collected.
+_BACKFILL_TASKS: list[asyncio.Task] = []
+
+
+def _schedule_backfill(coro: Any) -> None:
+    """Schedule a gate-list backfill coroutine and keep it alive."""
+    task = asyncio.ensure_future(coro)
+    _BACKFILL_TASKS.append(task)
+    task.add_done_callback(_BACKFILL_TASKS.remove)
+
 # Shared state store under hass.data[DOMAIN]["auto_open"]:
 #   {entry_id: {gate_id: bool}}  - per-gate "visitor auto open" switch state,
 #   isolated per config entry so multiple users never share each other's state.
@@ -50,7 +60,7 @@ async def async_setup_entry(
     if not gates:
         # Transient API hiccup right after HA restart: retry later so the
         # per-gate switches are created once the cached list becomes available.
-        hass.async_create_task(
+        _schedule_backfill(
             _retry_add_switches(hass, client, entry.entry_id, state, async_add_entities)
         )
 
@@ -63,19 +73,21 @@ async def _retry_add_switches(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Re-add switch entities after a transient empty gate list at setup."""
-    await asyncio.sleep(45)
-    try:
-        gates = await client.ensure_gates()
-    except Exception as err:  # noqa: BLE001
-        _LOGGER.warning("Retry switches: failed to fetch gates: %s", err)
+    for delay in (45, 120, 300):
+        await asyncio.sleep(delay)
+        try:
+            gates = await client.ensure_gates()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Retry switches: failed to fetch gates: %s", err)
+            continue
+        if not gates:
+            _LOGGER.warning("Retry switches: gate list still empty (delay %ss)", delay)
+            continue
+        _LOGGER.info("Retry switches: adding %d auto-open switches", len(gates))
+        async_add_entities(
+            WuYeBaoAutoOpenSwitch(client, entry_id, gate, state) for gate in gates
+        )
         return
-    if not gates:
-        _LOGGER.warning("Retry switches: gate list still empty, skipping")
-        return
-    _LOGGER.info("Retry switches: adding %d auto-open switches", len(gates))
-    async_add_entities(
-        WuYeBaoAutoOpenSwitch(client, entry_id, gate, state) for gate in gates
-    )
 
 
 class WuYeBaoAutoOpenSwitch(RestoreEntity, SwitchEntity):

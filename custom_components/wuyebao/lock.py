@@ -16,6 +16,17 @@ from .api import WuYeBaoClient
 
 _LOGGER = logging.getLogger(__name__)
 
+# Keep strong references to backfill tasks so they are not garbage-collected
+# before they run (asyncio drops tasks without a reference).
+_BACKFILL_TASKS: list[asyncio.Task] = []
+
+
+def _schedule_backfill(coro: Any) -> None:
+    """Schedule a gate-list backfill coroutine and keep it alive."""
+    task = asyncio.ensure_future(coro)
+    _BACKFILL_TASKS.append(task)
+    task.add_done_callback(_BACKFILL_TASKS.remove)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -40,9 +51,10 @@ async def async_setup_entry(
 
     if not gates:
         # Transient API hiccup right after HA restart: the gate list was
-        # empty for this platform.  Retry later so the lock entities are
-        # created once the cached list becomes available (v7.0.5 hardening).
-        hass.async_create_task(
+        # empty for this platform.  Retry a few times (with delays covering
+        # the HA-startup window) so the lock entities are created once the
+        # cached list becomes available (v7.0.6 hardening).
+        _schedule_backfill(
             _retry_add_locks(hass, client, entry.entry_id, async_add_entities)
         )
 
@@ -54,17 +66,19 @@ async def _retry_add_locks(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Re-add lock entities after a transient empty gate list at setup."""
-    await asyncio.sleep(45)
-    try:
-        gates = await client.ensure_gates()
-    except Exception as err:  # noqa: BLE001
-        _LOGGER.warning("Retry locks: failed to fetch gates: %s", err)
+    for delay in (45, 120, 300):
+        await asyncio.sleep(delay)
+        try:
+            gates = await client.ensure_gates()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Retry locks: failed to fetch gates: %s", err)
+            continue
+        if not gates:
+            _LOGGER.warning("Retry locks: gate list still empty (delay %ss)", delay)
+            continue
+        _LOGGER.info("Retry locks: adding %d lock entities", len(gates))
+        async_add_entities([WuYeBaoLock(client, entry_id, gate) for gate in gates])
         return
-    if not gates:
-        _LOGGER.warning("Retry locks: gate list still empty, skipping")
-        return
-    _LOGGER.info("Retry locks: adding %d lock entities", len(gates))
-    async_add_entities([WuYeBaoLock(client, entry_id, gate) for gate in gates])
 
 
 class WuYeBaoLock(LockEntity):

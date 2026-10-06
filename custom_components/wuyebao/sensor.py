@@ -18,6 +18,16 @@ from .rtsp_server import RTSP_PORT
 
 _LOGGER = logging.getLogger(__name__)
 
+# Keep strong references to backfill tasks so they are not garbage-collected.
+_BACKFILL_TASKS: list[asyncio.Task] = []
+
+
+def _schedule_backfill(coro: Any) -> None:
+    """Schedule a gate-list backfill coroutine and keep it alive."""
+    task = asyncio.ensure_future(coro)
+    _BACKFILL_TASKS.append(task)
+    task.add_done_callback(_BACKFILL_TASKS.remove)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -72,7 +82,7 @@ async def async_setup_entry(
     if not gates:
         # Transient API hiccup right after HA restart: retry later so the
         # per-gate sensors are created once the cached list becomes available.
-        hass.async_create_task(
+        _schedule_backfill(
             _retry_add_sensors(hass, client, entry.entry_id, rtsp_host, async_add_entities)
         )
 
@@ -85,19 +95,21 @@ async def _retry_add_sensors(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Re-add per-gate sensors after a transient empty gate list at setup."""
-    await asyncio.sleep(45)
-    try:
-        gates = await client.ensure_gates()
-    except Exception as err:  # noqa: BLE001
-        _LOGGER.warning("Retry sensors: failed to fetch gates: %s", err)
+    for delay in (45, 120, 300):
+        await asyncio.sleep(delay)
+        try:
+            gates = await client.ensure_gates()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Retry sensors: failed to fetch gates: %s", err)
+            continue
+        if not gates:
+            _LOGGER.warning("Retry sensors: gate list still empty (delay %ss)", delay)
+            continue
+        _LOGGER.info("Retry sensors: adding %d gate sensors", len(gates))
+        async_add_entities(
+            WuYeBaoGateStreamSensor(client, entry_id, gate, rtsp_host) for gate in gates
+        )
         return
-    if not gates:
-        _LOGGER.warning("Retry sensors: gate list still empty, skipping")
-        return
-    _LOGGER.info("Retry sensors: adding %d gate sensors", len(gates))
-    async_add_entities(
-        WuYeBaoGateStreamSensor(client, entry_id, gate, rtsp_host) for gate in gates
-    )
 
 
 class WuYeBaoCommunitySensor(SensorEntity):

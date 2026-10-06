@@ -23,6 +23,16 @@ from .api import WuYeBaoClient
 
 _LOGGER = logging.getLogger(__name__)
 
+# Keep strong references to backfill tasks so they are not garbage-collected.
+_BACKFILL_TASKS: list[asyncio.Task] = []
+
+
+def _schedule_backfill(coro: Any) -> None:
+    """Schedule a gate-list backfill coroutine and keep it alive."""
+    task = asyncio.ensure_future(coro)
+    _BACKFILL_TASKS.append(task)
+    task.add_done_callback(_BACKFILL_TASKS.remove)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -57,7 +67,7 @@ async def async_setup_entry(
     if not gates:
         # Transient API hiccup right after HA restart: retry later so the
         # camera entities are created once the cached list becomes available.
-        hass.async_create_task(
+        _schedule_backfill(
             _retry_add_cameras(hass, client, entry.entry_id, manager, async_add_entities)
         )
 
@@ -70,24 +80,26 @@ async def _retry_add_cameras(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Re-add camera entities after a transient empty gate list at setup."""
-    await asyncio.sleep(45)
-    try:
-        gates = await client.ensure_gates()
-    except Exception as err:  # noqa: BLE001
-        _LOGGER.warning("Retry cameras: failed to fetch gates: %s", err)
+    for delay in (45, 120, 300):
+        await asyncio.sleep(delay)
+        try:
+            gates = await client.ensure_gates()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Retry cameras: failed to fetch gates: %s", err)
+            continue
+        if not gates:
+            _LOGGER.warning("Retry cameras: gate list still empty (delay %ss)", delay)
+            continue
+        _LOGGER.info("Retry cameras: adding camera entities for %d gates", len(gates))
+        entities: list[Camera] = []
+        for gate in gates:
+            if gate.get("type", "") in ("wall", "outdoor"):
+                entities.append(WuYeBaoCamera(client, entry_id, gate))
+                entities.append(WuYeBaoLiveCamera(client, entry_id, gate, manager))
+                if manager is not None:
+                    manager.register_gate(_gate_id(gate), gate, client)
+        async_add_entities(entities)
         return
-    if not gates:
-        _LOGGER.warning("Retry cameras: gate list still empty, skipping")
-        return
-    _LOGGER.info("Retry cameras: adding camera entities for %d gates", len(gates))
-    entities: list[Camera] = []
-    for gate in gates:
-        if gate.get("type", "") in ("wall", "outdoor"):
-            entities.append(WuYeBaoCamera(client, entry_id, gate))
-            entities.append(WuYeBaoLiveCamera(client, entry_id, gate, manager))
-            if manager is not None:
-                manager.register_gate(_gate_id(gate), gate, client)
-    async_add_entities(entities)
 
 
 def _gate_id(gate: dict[str, Any]) -> str:
