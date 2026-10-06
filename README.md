@@ -166,6 +166,11 @@ Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业�
 <details>
 <summary>📋 更新日志（点击展开）</summary>
 
+### v7.1.6
+- **修复 HAOS 上 HACS 无法更新集成（下载报 Unknown error）**
+  - 根因：`hacs.json` 的 `homeassistant` 字段为 `">=2024.6.0"` 格式，HACS 运行时用 awesomeversion 将其解析为 unknown 类型，与 HA 版本（CalVer）比较时抛 `AwesomeVersionCompareException`，导致 HACS 下载集成直接失败
+  - 修复：改回裸版本号 `"2024.6.0"`（HACS 校验接受两种格式，但运行时只认裸版本号；`manifest.json` 保持无 `homeassistant` 键以满足 hassfest）
+
 ### v7.1.5
 - **通过 HACS 官方发布校验（hassfest + HACS Action CI 全绿）**，为申请加入 HACS 默认存储库
   - `manifest.json` 键按官方规范排序（`domain`、`name` 在前，其余键按字母序，如 `integration_type` 排在 `iot_class` 前）
