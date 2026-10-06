@@ -3,9 +3,6 @@
   "content_in_root": false,
   "render_readme": true,
   "country": "CN",
-  "homeassistant": "2024.6.0",
-  "domains": [
-    "wuyebao"
-  ],
+  "homeassistant": ">=2024.6.0",
   "iot_class": "cloud_polling"
 }

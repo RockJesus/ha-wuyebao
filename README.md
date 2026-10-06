@@ -166,6 +166,12 @@ Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业�
 <details>
 <summary>📋 更新日志（点击展开）</summary>
 
+### v7.1.3
+- **通过 HACS 官方发布校验（hassfest + HACS Action CI 全绿）**：为申请加入 HACS 默认存储库做准备
+  - 修复 `manifest.json` 的 `homeassistant` 版本格式：裸版本号 → `>=` 前缀（`">=2024.6.0"`），符合官方 manifest 规范
+  - 修复 `hacs.json`：移除不被 HACS 校验接受的 `domains` 字段（HACS 按 `custom_components/<domain>/` 自动识别），`homeassistant` 同步改为 `>=` 前缀格式
+  - 仓库新增两个官方校验工作流：`hassfest`（manifest/翻译/品牌图检查）与 `HACS Action`（HACS 仓库校验），提交合并到 main 后自动运行
+
 ### v7.1.2
 - **补全每门「gate-id」独立传感器**：此前每门只有「门禁流媒体地址」传感器（gate-id 仅存在于属性中）；现每门新增独立的 `gate-id` 传感器（值=门禁设备 ID，与流媒体地址传感器挂同一门禁设备下）
 - 全量核对门-实体对应关系：27 个设备（小区门×2 + 单元门×24 + 主站×1）挂载结构一致，无实体错挂/串挂

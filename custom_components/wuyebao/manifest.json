@@ -8,11 +8,11 @@
   "documentation": "https://github.com/RockJesus/ha-wuyebao",
   "issue_tracker": "https://github.com/RockJesus/ha-wuyebao/issues",
   "requirements": [],
-  "version": "7.1.2",
+  "version": "7.1.3",
   "iot_class": "cloud_polling",
   "loggers": [
     "custom_components.wuyebao"
   ],
   "integration_type": "hub",
-  "homeassistant": "2024.6.0"
+  "homeassistant": ">=2024.6.0"
 }
