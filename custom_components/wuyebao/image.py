@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.image import Image, ImageEntity
+from homeassistant.components.image import ImageEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -53,12 +53,11 @@ def _hub_device_info(entry_id: str) -> DeviceInfo:
 class _WuYeBaoHubImage(ImageEntity):
     """Base class: image entity fed by hub_data cache + URL change push.
 
-    The picture is served by implementing ``async_image()`` (the API client
-    downloads the snapshot with its own HTTP session) instead of advertising
-    ``image_url``, so the HA image proxy never has to reach the upstream URL
-    itself (v7.0.8 fix: the old code called a non-existent
-    ``async_update_image_state()`` and left ``image_url`` set, which made the
-    proxy fetch the upstream URL and return 500).
+    The picture is served by implementing ``async_image()`` (returns raw
+    bytes, as the HA core image proxy expects) — the API client downloads
+    the snapshot with its own HTTP session, so the proxy never has to reach
+    the upstream URL itself.  ``image_url`` stays UNDEFINED so the core
+    never tries its own URL-fetch path.
     """
 
     _attr_has_entity_name = True
@@ -82,13 +81,22 @@ class _WuYeBaoHubImage(ImageEntity):
         # Initial timestamp: without it the frontend treats the image as stale
         # and may not render.  Set from the first poll below.
         self._attr_image_last_updated = dt_util.utcnow()
-        # Internal latest snapshot URL.  Deliberately NOT exposed through
-        # ``_attr_image_url`` (HA would proxy-fetch it and fail on the
-        # upstream URL); the picture bytes come from ``async_image()``.
+        # Internal latest snapshot URL + cached bytes.  Deliberately NOT
+        # exposed through ``_attr_image_url`` (HA would proxy-fetch it and
+        # fail on the upstream URL); picture bytes come from ``async_image()``.
         self._current_url: str | None = None
+        self._cached_content: bytes | None = None
 
     def _extract_url(self, data: Any) -> str | None:
         raise NotImplementedError
+
+    async def _download(self, url: str) -> bytes | None:
+        """Download picture bytes through the API client's HTTP session."""
+        try:
+            return await self._client.download_image(url)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Image %s download failed: %s", self._attr_name, err)
+            return None
 
     async def async_update(self) -> None:
         """Refresh image URL from the hub cache and push if it changed."""
@@ -101,25 +109,34 @@ class _WuYeBaoHubImage(ImageEntity):
         if url == self._current_url:
             return
         self._current_url = url
-        self._attr_image_last_updated = dt_util.utcnow()
-        self.async_write_ha_state()
+        content = await self._download(url)
+        if content:
+            self._cached_content = content
+            self._attr_image_last_updated = dt_util.utcnow()
+            self.async_write_ha_state()
 
-    async def async_image(self) -> Image | None:
-        """Return the latest snapshot picture.
+    async def async_image(self) -> bytes | None:
+        """Return the latest snapshot picture bytes (HA image proxy path).
 
-        Modern HA (>=2024.11) expects an ``Image`` object (not raw bytes) from
-        ``async_image()``; returning bytes made the image proxy answer 500.
+        Modern HA core calls ``async_image()`` and wraps the returned raw
+        bytes into an ``Image`` object itself — returning an ``Image`` here
+        (v7.0.9) or advertising ``image_url`` (v7.0.7) both made the proxy
+        answer 500.
         """
+        if self._cached_content:
+            return self._cached_content
         if not self._current_url:
             return None
-        try:
-            data = await self._client.download_image(self._current_url)
-            if not data:
-                return None
-            return Image(content_type="image/jpeg", content=data)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Image %s download failed: %s", self._attr_name, err)
-            return None
+        content = await self._download(self._current_url)
+        if content:
+            self._cached_content = content
+            self._attr_image_last_updated = dt_util.utcnow()
+            self.async_write_ha_state()
+        return content
+
+    def image(self) -> bytes | None:
+        """Synchronous fallback used if core ever takes the executor path."""
+        return self._cached_content
 
 
 class WuYeBaoFaceImage(_WuYeBaoHubImage):
