@@ -49,10 +49,8 @@ async def async_setup_entry(
         WuYeBaoUserSensor(client, entry.entry_id),
         WuYeBaoRepairSensor(client, entry.entry_id),
         WuYeBaoVisitorSensor(client, entry.entry_id),
-        WuYeBaoFaceSensor(client, entry.entry_id),
         WuYeBaoNoticeSensor(client, entry.entry_id),
         WuYeBaoAlarmSensor(client, entry.entry_id),
-        WuYeBaoCallsSensor(client, entry.entry_id),
     ]
 
     # One stream-address sensor per gate device (mounted on the same device
@@ -373,50 +371,6 @@ class WuYeBaoVisitorSensor(_WuYeBaoHubSensor):
         }
 
 
-class WuYeBaoFaceSensor(_WuYeBaoHubSensor):
-    """人脸信息 sensor (primary = description, picture via entity_picture/image attrs)."""
-
-    _attr_name = "人脸信息"
-    _attr_icon = "mdi:face-recognition"
-
-    def __init__(self, client: WuYeBaoClient, entry_id: str) -> None:
-        """Initialize the sensor."""
-        super().__init__(client, entry_id, "face")
-
-    def _value_from(self, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return None
-        faces = data.get("faces") or []
-        if not faces:
-            return "无"
-        return f"最近人脸（{len(faces)}）"
-
-    def _attrs_from(self, data: Any) -> dict[str, Any]:
-        if not isinstance(data, dict):
-            return {}
-        faces = data.get("faces") or []
-        auths = data.get("faceAuths") or []
-        images = [f.get("image") for f in faces[:10] if f.get("image")]
-        attrs: dict[str, Any] = {
-            "faces": len(faces),
-            "face_valid_time": data.get("faceValidTime"),
-            "face_images": images,
-            "auth_gates": [
-                {
-                    "community": a.get("communityName"),
-                    "area": a.get("areaName"),
-                    "building": a.get("buildingName"),
-                    "unit": a.get("unitName"),
-                }
-                for a in auths[:10]
-            ],
-        }
-        if images:
-            attrs["image"] = images[0]
-            attrs["entity_picture"] = images[0]
-        return attrs
-
-
 class WuYeBaoNoticeSensor(_WuYeBaoHubSensor):
     """小区公告 sensor (homepage carousel ads / notices)."""
 
@@ -476,56 +430,3 @@ class WuYeBaoAlarmSensor(_WuYeBaoHubSensor):
                 }
             )
         return {"count": len(data), "latest": latest}
-
-
-class WuYeBaoCallsSensor(_WuYeBaoHubSensor):
-    """呼叫记录 sensor (primary = latest call description, picture via entity_picture)."""
-
-    _attr_name = "呼叫记录"
-    _attr_icon = "mdi:phone-log"
-
-    def __init__(self, client: WuYeBaoClient, entry_id: str) -> None:
-        """Initialize the sensor."""
-        super().__init__(client, entry_id, "call_records")
-
-    def _value_from(self, data: Any) -> Any:
-        if not isinstance(data, list) or not data:
-            return "无呼叫记录"
-        import time as _time
-
-        ts = data[0].get("time")
-        if isinstance(ts, (int, float)):
-            ts_fmt = _time.strftime("%m-%d %H:%M", _time.localtime(int(ts)))
-            return f"最近呼叫 {ts_fmt}"
-        return "最近呼叫"
-
-    def _attrs_from(self, data: Any) -> dict[str, Any]:
-        if not isinstance(data, list) or not data:
-            return {"count": 0, "items": []}
-        import time as _time
-
-        items = []
-        for c in data[:20]:
-            ts = c.get("time")
-            ts_fmt = None
-            if isinstance(ts, (int, float)):
-                ts_fmt = _time.strftime(
-                    "%Y-%m-%d %H:%M:%S", _time.localtime(int(ts))
-                )
-            items.append(
-                {
-                    "time": ts_fmt,
-                    "time_unix": ts,
-                    "device": c.get("accessInfo") or c.get("deviceNumber"),
-                    "call_number": c.get("callNumber"),
-                    "type": c.get("devicesType"),
-                    "image": c.get("imageUrl"),
-                    "state": c.get("state"),
-                }
-            )
-        attrs: dict[str, Any] = {"count": len(data), "items": items}
-        img = data[0].get("imageUrl")
-        if img:
-            attrs["image"] = img
-            attrs["entity_picture"] = img
-        return attrs

@@ -5,7 +5,6 @@ DOMAIN = "wuyebao"
 # Configuration
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
-CONF_ROOM = "room"
 
 # Defaults
 DEFAULT_BASE_URL = "https://wuye.jhws.top"

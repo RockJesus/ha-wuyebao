@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import entity_registry as er
 
-from .const import CONF_PASSWORD, CONF_ROOM, CONF_USERNAME, DOMAIN
+from .const import CONF_PASSWORD, CONF_USERNAME, DOMAIN
 from .api import WuYeBaoClient
 from .rtsp_server import RtspServer, VideoSessionManager
 
@@ -23,6 +23,7 @@ PLATFORMS: list[Platform] = [
     Platform.SWITCH,
     Platform.CAMERA,
     Platform.BUTTON,
+    Platform.IMAGE,
 ]
 
 # Visitor auto-open: poll call records and open doors whose switch is ON.
@@ -129,16 +130,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         password=entry.data[CONF_PASSWORD],
         session=session,
     )
-    # Owner's flat number (elevator call / 户户通 target)
-    client.room = (entry.data.get(CONF_ROOM) or "").strip() or None
+    # Owner's flat number is derived automatically by the API client from the
+    # bindingCode (RM-...-<floor>-<room>) fetched after login - there is no
+    # manual 房间号 field anymore.  Fall back to a legacy value if the user
+    # configured one before v7.0.4 and auto-resolution failed.
+    client.room = (entry.data.get("room") or "").strip() or None
     if client.room:
-        _LOGGER.info("Room configured: %s", client.room)
+        _LOGGER.info("Room from legacy config: %s", client.room)
 
     try:
         await client.login()
         _LOGGER.info("Logged in as %s, community: %s", client.username, client.community_name)
         _LOGGER.info("SIP token: %s", "obtained" if client.sip_jwt else "not available")
-        # Fetch owner info (contains bindingCode for camera call records)
+        # Fetch owner info (contains bindingCode for camera call records and
+        # auto-resolves the owner's room for elevator/户户通 calls).
         try:
             await client.get_owners()
         except Exception as err:
@@ -171,6 +176,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # legacy "流地址" sensors removed in 6.6.8 (RTSP URL now
                 # exposed as an attribute on the 实时监控 camera entity)
                 or ent.unique_id.startswith(f"{entry.entry_id}_stream_")
+                # legacy 人脸信息/呼叫记录 sensors replaced by image
+                # entities in 7.0.4 (same feature, now shows the picture)
+                or ent.unique_id.startswith(f"{entry.entry_id}_face")
+                or ent.unique_id.startswith(f"{entry.entry_id}_call_records")
             )
         ):
             ent_reg.async_remove(entity_id)

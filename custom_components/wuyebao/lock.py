@@ -42,7 +42,7 @@ class WuYeBaoLock(LockEntity):
     """Representation of a 物业宝 door lock."""
 
     _attr_has_entity_name = True
-    _attr_name = "开门"
+    _attr_name = "门锁"
 
     def __init__(
         self,

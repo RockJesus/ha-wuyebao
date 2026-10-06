@@ -171,7 +171,7 @@ class WuYeBaoElevatorButton(ButtonEntity):
         """Call the elevator."""
         if not self._client.room:
             raise RuntimeError(
-                "房间号未配置：请到 设置→设备与服务→物业宝→选项 填写房间号（如 2702）"
+                "房间号自动获取失败：请重新登录集成（房间号由登录后的绑定编码自动解析）"
             )
         result = await self._client.call_elevator_sip(self._gate)
         _LOGGER.info(
@@ -233,7 +233,7 @@ class WuYeBaoHouseholdButton(ButtonEntity):
         """Call the indoor unit (户户通)."""
         if not self._client.room:
             raise RuntimeError(
-                "房间号未配置：请到 设置→设备与服务→物业宝→选项 填写房间号（如 2702）"
+                "房间号自动获取失败：请重新登录集成（房间号由登录后的绑定编码自动解析）"
             )
         if self._manager is None:
             raise RuntimeError("视频管理器未就绪：请重新加载集成")

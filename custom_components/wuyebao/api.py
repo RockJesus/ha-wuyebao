@@ -374,10 +374,36 @@ class WuYeBaoClient:
                     break
             if self.binding_code:
                 _LOGGER.info("Binding code: %s", self.binding_code)
+                self._resolve_room_from_binding()
             if self.unit_id:
                 _LOGGER.info("Unit id: %s", self.unit_id)
             return raw
         return []
+
+    def _resolve_room_from_binding(self) -> None:
+        """Auto-derive the owner's flat number (e.g. "2702") from bindingCode.
+
+        The binding code is the indoor-unit SIP number captured from the app:
+            RM-<communityCode>-<areaCode>-<buildingCode>-<unitCode>-<floor>-<room>
+        e.g. RM-840-1-4-1-27-2  ->  floor 27, room 02  ->  "2702"
+
+        This replaces the old manual "房间号" field in the config flow: the
+        room is now always fetched automatically after login, so elevator
+        calls and 户户通 work without user configuration.
+        """
+        try:
+            parts = str(self.binding_code or "").split("-")
+            if len(parts) < 2:
+                return
+            floor = str(parts[-2]).strip()
+            room_code = str(parts[-1]).strip()
+            if not floor.isdigit() or not room_code.isdigit():
+                return
+            room = floor + room_code.zfill(2)
+            self.room = room
+            _LOGGER.info("Room auto-resolved from binding code: %s", self.room)
+        except Exception as err:  # noqa: BLE001 - best effort
+            _LOGGER.warning("Failed to resolve room from binding code: %s", err)
 
     async def get_calls(
         self, page: int = 1, page_size: int = 20
