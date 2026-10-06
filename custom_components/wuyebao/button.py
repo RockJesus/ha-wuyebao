@@ -103,11 +103,49 @@ def _gate_id(gate: dict[str, Any]) -> str:
     )
 
 
+def _build_device_name(gate: dict[str, Any]) -> str:
+    """Build a human-friendly device name from gate data (same as lock.py)."""
+    alias = gate.get("alias", "")
+    if alias and len(str(alias).strip()) > 0:
+        return str(alias).strip()
+
+    parts: list[str] = []
+    community = gate.get("communityName")
+    if community:
+        parts.append(str(community))
+    area = gate.get("areaName", "")
+    if area:
+        parts.append(str(area))
+    building = gate.get("buildingName", "")
+    if building:
+        parts.append(str(building))
+    unit = gate.get("unitName", "")
+    if unit:
+        parts.append(str(unit))
+
+    device_number = gate.get("deviceNumber", "")
+    gate_type = gate.get("type", "")
+    if gate_type == "wall":
+        if device_number == "a":
+            parts.append("南门")
+        elif device_number == "b":
+            parts.append("北门")
+        else:
+            parts.append(f"围墙门-{device_number}")
+    else:
+        if device_number:
+            parts.append(f"门口机{device_number}")
+        else:
+            parts.append("单元门")
+
+    return " ".join(parts) if parts else f"门禁-{device_number or 'unknown'}"
+
+
 def _build_device_info(entry_id: str, gate: dict[str, Any]) -> DeviceInfo:
     """Device info must match lock.py so entities merge under one device."""
     return DeviceInfo(
         identifiers={(DOMAIN, f"{entry_id}_{_gate_id(gate)}")},
-        name="物业宝 门禁",
+        name=_build_device_name(gate),
         manufacturer="深圳家和云联",
         model="物业宝 云门禁",
         sw_version="1.1.1.51",

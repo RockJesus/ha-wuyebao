@@ -188,11 +188,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # entries (multiple user accounts) so the second entry reuses the already
     # bound server instead of fighting for the same port.
     manager: VideoSessionManager | None = hass.data[DOMAIN].get("video_manager")
+    rtsp_server: RtspServer | None = hass.data[DOMAIN].get("rtsp_server")
     if manager is None:
         manager = VideoSessionManager()
         rtsp_server = RtspServer(manager)
         hass.data[DOMAIN]["video_manager"] = manager
         hass.data[DOMAIN]["rtsp_server"] = rtsp_server
+    # After a config-entry reload the old server object may still be cached
+    # here but already stopped (see async_unload_entry) - restart it so live
+    # camera streams keep working (v7.0.7 fix).
+    if rtsp_server is not None and rtsp_server._server is None:
         if not await rtsp_server.start():
             _LOGGER.warning(
                 "RTSP server could not bind %s:%s - live camera streams disabled",
@@ -251,5 +256,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await manager.shutdown()
         if rtsp_server:
             await rtsp_server.stop()
+        # Critical: drop the shared video resources so a config-entry reload
+        # re-binds the RTSP port.  Keeping them in hass.data would make
+        # async_setup_entry skip rtsp_server.start() and leave every live
+        # camera stream dead (v7.0.7 fix).
+        hass.data[DOMAIN].pop("rtsp_server", None)
+        hass.data[DOMAIN].pop("video_manager", None)
         hass.data[DOMAIN].pop(entry.entry_id)
     return unload_ok
