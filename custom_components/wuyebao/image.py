@@ -51,7 +51,15 @@ def _hub_device_info(entry_id: str) -> DeviceInfo:
 
 
 class _WuYeBaoHubImage(ImageEntity):
-    """Base class: image entity fed by hub_data cache + URL change push."""
+    """Base class: image entity fed by hub_data cache + URL change push.
+
+    The picture is served by implementing ``async_image()`` (the API client
+    downloads the snapshot with its own HTTP session) instead of advertising
+    ``image_url``, so the HA image proxy never has to reach the upstream URL
+    itself (v7.0.8 fix: the old code called a non-existent
+    ``async_update_image_state()`` and left ``image_url`` set, which made the
+    proxy fetch the upstream URL and return 500).
+    """
 
     _attr_has_entity_name = True
     # ImageEntity does not poll by default; we need periodic polls to notice
@@ -74,7 +82,10 @@ class _WuYeBaoHubImage(ImageEntity):
         # Initial timestamp: without it the frontend treats the image as stale
         # and may not render.  Set from the first poll below.
         self._attr_image_last_updated = dt_util.utcnow()
-        self._attr_image_url: str | None = None
+        # Internal latest snapshot URL.  Deliberately NOT exposed through
+        # ``_attr_image_url`` (HA would proxy-fetch it and fail on the
+        # upstream URL); the picture bytes come from ``async_image()``.
+        self._current_url: str | None = None
 
     def _extract_url(self, data: Any) -> str | None:
         raise NotImplementedError
@@ -87,11 +98,21 @@ class _WuYeBaoHubImage(ImageEntity):
             # No fresh snapshot: keep showing the last known picture instead
             # of blanking the entity on a transient gap.
             return
-        if url == self._attr_image_url:
+        if url == self._current_url:
             return
-        self._attr_image_url = url
+        self._current_url = url
         self._attr_image_last_updated = dt_util.utcnow()
-        self.async_update_image_state()
+        self.async_write_ha_state()
+
+    async def async_image(self) -> bytes | None:
+        """Return the latest snapshot picture bytes."""
+        if not self._current_url:
+            return None
+        try:
+            return await self._client.download_image(self._current_url)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Image %s download failed: %s", self._attr_name, err)
+            return None
 
 
 class WuYeBaoFaceImage(_WuYeBaoHubImage):
