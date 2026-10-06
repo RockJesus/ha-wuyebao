@@ -166,10 +166,13 @@ Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业�
 <details>
 <summary>📋 更新日志（点击展开）</summary>
 
-### v7.1.4
+### v7.1.5
 - **通过 HACS 官方发布校验（hassfest + HACS Action CI 全绿）**，为申请加入 HACS 默认存储库
-  - `manifest.json`：移除官方 manifest 规范中不存在的 `homeassistant` 键（hassfest 校验仅接受内置集成使用的特殊值；自定义集成最低 Home Assistant 版本改由 hacs.json 的 `homeassistant` 键声明）
-  - `hacs.json`：移除不被 HACS 校验接受的 `iot_class` 键（HACS 合法键：name / content_in_root / render_readme / country / homeassistant / zip_release / filename）
+  - `manifest.json` 键按官方规范排序（`domain`、`name` 在前，其余键按字母序，如 `integration_type` 排在 `iot_class` 前）
+  - 至此 hassfest 与 HACS Action 两项官方校验均通过
+
+### v7.1.4
+- 提交 HACS 官方校验（hassfest + HACS Action）：`manifest.json` 移除官方规范中不存在的 `homeassistant` 键（自定义集成最低版本由 hacs.json 的 `homeassistant` 键声明）；`hacs.json` 移除不被 HACS 校验接受的 `iot_class` 键（本轮 HACS Action 已通过，hassfest 仍报键排序错误，由 v7.1.5 完成）
 
 ### v7.1.3
 - **提交 HACS 官方校验（hassfest + HACS Action）**：为申请加入 HACS 默认存储库，仓库新增两个官方 CI 工作流

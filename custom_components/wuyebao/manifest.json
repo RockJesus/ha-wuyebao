@@ -6,12 +6,12 @@
   ],
   "config_flow": true,
   "documentation": "https://github.com/RockJesus/ha-wuyebao",
-  "issue_tracker": "https://github.com/RockJesus/ha-wuyebao/issues",
-  "requirements": [],
-  "version": "7.1.4",
+  "integration_type": "hub",
   "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/RockJesus/ha-wuyebao/issues",
   "loggers": [
     "custom_components.wuyebao"
   ],
-  "integration_type": "hub"
+  "requirements": [],
+  "version": "7.1.5"
 }
