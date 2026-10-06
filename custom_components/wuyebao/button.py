@@ -1,6 +1,7 @@
 """Button platform for 物业宝."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -47,6 +48,39 @@ async def async_setup_entry(
         if gate.get("type") == "outdoor":
             entities.append(WuYeBaoElevatorButton(client, entry.entry_id, gate))
 
+    async_add_entities(entities)
+
+    if not gates:
+        # Transient API hiccup right after HA restart: retry later so the
+        # per-gate elevator buttons are created once the cached list becomes
+        # available (the two hub buttons above are always created).
+        hass.async_create_task(
+            _retry_add_buttons(hass, client, entry.entry_id, async_add_entities)
+        )
+
+
+async def _retry_add_buttons(
+    hass: HomeAssistant,
+    client: WuYeBaoClient,
+    entry_id: str,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Re-add elevator button entities after a transient empty gate list."""
+    await asyncio.sleep(45)
+    try:
+        gates = await client.ensure_gates()
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Retry buttons: failed to fetch gates: %s", err)
+        return
+    if not gates:
+        _LOGGER.warning("Retry buttons: gate list still empty, skipping")
+        return
+    entities = [
+        WuYeBaoElevatorButton(client, entry_id, gate)
+        for gate in gates
+        if gate.get("type") == "outdoor"
+    ]
+    _LOGGER.info("Retry buttons: adding %d elevator buttons", len(entities))
     async_add_entities(entities)
 
 

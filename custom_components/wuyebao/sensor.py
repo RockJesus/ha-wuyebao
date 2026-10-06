@@ -1,6 +1,7 @@
 """Sensor platform for 物业宝."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from urllib.parse import urlparse
@@ -67,6 +68,36 @@ async def async_setup_entry(
     )
 
     async_add_entities(entities)
+
+    if not gates:
+        # Transient API hiccup right after HA restart: retry later so the
+        # per-gate sensors are created once the cached list becomes available.
+        hass.async_create_task(
+            _retry_add_sensors(hass, client, entry.entry_id, rtsp_host, async_add_entities)
+        )
+
+
+async def _retry_add_sensors(
+    hass: HomeAssistant,
+    client: WuYeBaoClient,
+    entry_id: str,
+    rtsp_host: str,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Re-add per-gate sensors after a transient empty gate list at setup."""
+    await asyncio.sleep(45)
+    try:
+        gates = await client.ensure_gates()
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Retry sensors: failed to fetch gates: %s", err)
+        return
+    if not gates:
+        _LOGGER.warning("Retry sensors: gate list still empty, skipping")
+        return
+    _LOGGER.info("Retry sensors: adding %d gate sensors", len(gates))
+    async_add_entities(
+        WuYeBaoGateStreamSensor(client, entry_id, gate, rtsp_host) for gate in gates
+    )
 
 
 class WuYeBaoCommunitySensor(SensorEntity):

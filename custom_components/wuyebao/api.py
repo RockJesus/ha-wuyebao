@@ -305,7 +305,7 @@ class WuYeBaoClient:
                 return self.gates
 
             last_err: Exception | None = None
-            for attempt in range(4):
+            for attempt in range(6):
                 try:
                     params = {}
                     if self.community_id:
@@ -332,7 +332,9 @@ class WuYeBaoClient:
                 except Exception as err:  # noqa: BLE001 - retry transient errors
                     last_err = err
                     _LOGGER.warning("Gate list attempt %d failed: %s", attempt + 1, err)
-                if attempt < 3:
+                if attempt < 5:
+                    # Backoff 2/4/6/8/10 s: covers the HA-startup window where
+                    # the property API may not be reachable yet.
                     await asyncio.sleep(2.0 * (attempt + 1))
 
             _LOGGER.error("Failed to fetch gate list after retries: %s", last_err)

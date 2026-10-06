@@ -1,6 +1,7 @@
 """Lock platform for 物业宝."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -36,6 +37,34 @@ async def async_setup_entry(
 
     entities = [WuYeBaoLock(client, entry.entry_id, gate) for gate in gates]
     async_add_entities(entities)
+
+    if not gates:
+        # Transient API hiccup right after HA restart: the gate list was
+        # empty for this platform.  Retry later so the lock entities are
+        # created once the cached list becomes available (v7.0.5 hardening).
+        hass.async_create_task(
+            _retry_add_locks(hass, client, entry.entry_id, async_add_entities)
+        )
+
+
+async def _retry_add_locks(
+    hass: HomeAssistant,
+    client: WuYeBaoClient,
+    entry_id: str,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Re-add lock entities after a transient empty gate list at setup."""
+    await asyncio.sleep(45)
+    try:
+        gates = await client.ensure_gates()
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Retry locks: failed to fetch gates: %s", err)
+        return
+    if not gates:
+        _LOGGER.warning("Retry locks: gate list still empty, skipping")
+        return
+    _LOGGER.info("Retry locks: adding %d lock entities", len(gates))
+    async_add_entities([WuYeBaoLock(client, entry_id, gate) for gate in gates])
 
 
 class WuYeBaoLock(LockEntity):

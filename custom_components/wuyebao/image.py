@@ -34,8 +34,8 @@ async def async_setup_entry(
 
     async_add_entities(
         [
-            WuYeBaoFaceImage(client, entry.entry_id),
-            WuYeBaoCallsImage(client, entry.entry_id),
+            WuYeBaoFaceImage(hass, client, entry.entry_id),
+            WuYeBaoCallsImage(hass, client, entry.entry_id),
         ]
     )
 
@@ -58,9 +58,15 @@ class _WuYeBaoHubImage(ImageEntity):
     # when the snapshot URL in hub_data changes and push a new picture.
     _attr_should_poll = True
 
-    def __init__(self, client: WuYeBaoClient, entry_id: str, key: str) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        client: WuYeBaoClient,
+        entry_id: str,
+        key: str,
+    ) -> None:
         """Initialize the image entity."""
-        super().__init__()
+        super().__init__(hass)
         self._client = client
         self._key = key
         self._attr_unique_id = f"{entry_id}_{key}"
@@ -94,9 +100,9 @@ class WuYeBaoFaceImage(_WuYeBaoHubImage):
     _attr_name = "人脸信息"
     _attr_icon = "mdi:face-recognition"
 
-    def __init__(self, client: WuYeBaoClient, entry_id: str) -> None:
+    def __init__(self, hass: HomeAssistant, client: WuYeBaoClient, entry_id: str) -> None:
         """Initialize the face image entity."""
-        super().__init__(client, entry_id, "face")
+        super().__init__(hass, client, entry_id, "face")
 
     def _extract_url(self, data: Any) -> str | None:
         if not isinstance(data, dict):
@@ -135,9 +141,9 @@ class WuYeBaoCallsImage(_WuYeBaoHubImage):
     _attr_name = "呼叫记录"
     _attr_icon = "mdi:phone-log"
 
-    def __init__(self, client: WuYeBaoClient, entry_id: str) -> None:
+    def __init__(self, hass: HomeAssistant, client: WuYeBaoClient, entry_id: str) -> None:
         """Initialize the calls image entity."""
-        super().__init__(client, entry_id, "call_records")
+        super().__init__(hass, client, entry_id, "call_records")
 
     def _extract_url(self, data: Any) -> str | None:
         if not isinstance(data, list) or not data:

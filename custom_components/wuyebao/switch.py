@@ -1,6 +1,7 @@
 """Switch platform for 物业宝 visitor auto-open."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -45,6 +46,36 @@ async def async_setup_entry(
         WuYeBaoAutoOpenSwitch(client, entry.entry_id, gate, state) for gate in gates
     ]
     async_add_entities(entities)
+
+    if not gates:
+        # Transient API hiccup right after HA restart: retry later so the
+        # per-gate switches are created once the cached list becomes available.
+        hass.async_create_task(
+            _retry_add_switches(hass, client, entry.entry_id, state, async_add_entities)
+        )
+
+
+async def _retry_add_switches(
+    hass: HomeAssistant,
+    client: WuYeBaoClient,
+    entry_id: str,
+    state: dict[str, bool],
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Re-add switch entities after a transient empty gate list at setup."""
+    await asyncio.sleep(45)
+    try:
+        gates = await client.ensure_gates()
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("Retry switches: failed to fetch gates: %s", err)
+        return
+    if not gates:
+        _LOGGER.warning("Retry switches: gate list still empty, skipping")
+        return
+    _LOGGER.info("Retry switches: adding %d auto-open switches", len(gates))
+    async_add_entities(
+        WuYeBaoAutoOpenSwitch(client, entry_id, gate, state) for gate in gates
+    )
 
 
 class WuYeBaoAutoOpenSwitch(RestoreEntity, SwitchEntity):
