@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.image import ImageEntity
+from homeassistant.components.image import Image, ImageEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -104,12 +104,19 @@ class _WuYeBaoHubImage(ImageEntity):
         self._attr_image_last_updated = dt_util.utcnow()
         self.async_write_ha_state()
 
-    async def async_image(self) -> bytes | None:
-        """Return the latest snapshot picture bytes."""
+    async def async_image(self) -> Image | None:
+        """Return the latest snapshot picture.
+
+        Modern HA (>=2024.11) expects an ``Image`` object (not raw bytes) from
+        ``async_image()``; returning bytes made the image proxy answer 500.
+        """
         if not self._current_url:
             return None
         try:
-            return await self._client.download_image(self._current_url)
+            data = await self._client.download_image(self._current_url)
+            if not data:
+                return None
+            return Image(content_type="image/jpeg", content=data)
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("Image %s download failed: %s", self._attr_name, err)
             return None
