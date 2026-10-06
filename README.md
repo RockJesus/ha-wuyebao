@@ -166,6 +166,10 @@ Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业�
 <details>
 <summary>📋 更新日志（点击展开）</summary>
 
+### v7.1.7
+- **品牌图标尺寸合规**：`brand/icon.png` 由 128×128 升级为 256×256（官方品牌规范要求 icon 为 256×256），并补齐 `brand/icon@2x.png`（512×512）、`brand/logo@2x.png`（256×256）用于高分辨率显示
+- **brands 仓库 PR 不再需要**：按 Home Assistant 官方公告（Brands Proxy API，2026-02-24），自定义集成自 2026.3 起在集成目录内直接提供 `brand/` 品牌图即可（本地品牌图自动优先于 CDN），无需再向 `home-assistant/brands` 提交 PR
+
 ### v7.1.6
 - **修复 HAOS 上 HACS 无法更新集成（下载报 Unknown error）**
   - 根因：`hacs.json` 的 `homeassistant` 字段为 `">=2024.6.0"` 格式，HACS 运行时用 awesomeversion 将其解析为 unknown 类型，与 HA 版本（CalVer）比较时抛 `AwesomeVersionCompareException`，导致 HACS 下载集成直接失败
