@@ -889,16 +889,34 @@ class SipMonitorCall:
 
         max_attempts = getattr(self, "max_monitor_attempts", 8)
         retry_delay = getattr(self, "monitor_retry_delay", 1.5)
+        # 404 Not Found means the device URI is not registered/reachable on
+        # the SIP server (device offline, registration lost).  Retrying 8x
+        # with the busy backoff is wasted time - try a few times briskly in
+        # case the device comes back, then give up.
+        max_404_attempts = getattr(self, "max_monitor_404_attempts", 4)
         last = {"ok": False, "status": 0, "error": "INVITE failed"}
         for attempt in range(1, max_attempts + 1):
             if not self._running.is_set():
                 break
             if attempt > 1:
-                # 486 Busy Here means the gate device is busy right now; give
-                # it more time to finish whatever it is doing (the official
-                # app also waits several seconds between retries).  Other
-                # failures (no media etc.) retry briskly.
-                delay = 6.0 if last.get("status") == 486 else retry_delay
+                status = last.get("status")
+                if status == 404:
+                    if attempt > max_404_attempts:
+                        _LOGGER.info(
+                            "Monitor %s: 404 given up after %d attempts",
+                            self.gt_uri, max_404_attempts,
+                        )
+                        break
+                    delay = 2.0
+                elif status == 486:
+                    # 486 Busy Here means the gate device is busy right now;
+                    # give it more time to finish whatever it is doing (the
+                    # official app also waits several seconds between
+                    # retries).
+                    delay = 6.0
+                else:
+                    # Other failures (no media etc.) retry briskly.
+                    delay = retry_delay
                 _LOGGER.info(
                     "Monitor %s retry %d/%d (delay %.1fs)",
                     self.gt_uri, attempt, max_attempts, delay,

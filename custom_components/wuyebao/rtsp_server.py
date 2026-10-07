@@ -629,18 +629,19 @@ class RtspClientConnection:
                 await self._send("404 Not Found", {"CSeq": cseq})
                 return True
             # Bounded wait: for unit doors establishing the SIP call can take
-            # 30-60s, longer than most RTSP clients wait for DESCRIBE.  We
-            # give the session 25s here; if it is not ready, still answer 200
-            # with the (possibly empty) SDP so the client proceeds to
-            # SETUP/PLAY - the session keeps building in the background (the
-            # task is shielded so the timeout does NOT cancel it) and the
-            # client's automatic reconnect (go2rtc/ffmpeg) will find it
-            # already established (IDLE_STOP_AFTER keeps it alive).
+            # 30-60s (up to 45s observed under video-wall multi-stream load),
+            # longer than most RTSP clients wait for DESCRIBE.  We give the
+            # session 45s here; if it is not ready, still answer 200 with the
+            # (possibly empty) SDP so the client proceeds to SETUP/PLAY - the
+            # session keeps building in the background (the task is shielded
+            # so the timeout does NOT cancel it) and the client's automatic
+            # reconnect (go2rtc/ffmpeg) will find it already established
+            # (IDLE_STOP_AFTER keeps it alive).
             task = self._manager._track(
                 asyncio.ensure_future(self._manager.get_or_start(gate_id))
             )
             try:
-                sess = await asyncio.wait_for(asyncio.shield(task), 25.0)
+                sess = await asyncio.wait_for(asyncio.shield(task), 45.0)
             except asyncio.TimeoutError:
                 sess = None
                 _LOGGER.warning(
@@ -735,11 +736,12 @@ class RtspClientConnection:
                 },
             )
             # If the SIP session is still being established (DESCRIBE may
-            # have answered early with an empty SDP), wait up to 25s for it
-            # before subscribing.  Slow unit doors can take this long after
-            # the 200 OK to push video; the bounded wait (shielded - the
-            # establishment continues in the background if we time out) plus
-            # the client's reconnect keeps the flow alive.
+            # have answered early with an empty SDP), wait up to 45s for it
+            # before subscribing.  Slow unit doors / video-wall multi-stream
+            # load can take this long after the 200 OK to push video; the
+            # bounded wait (shielded - the establishment continues in the
+            # background if we time out) plus the client's reconnect keeps
+            # the flow alive.
             sess = self._manager.get_session(self._gate_id)
             if sess is None:
                 task = self._manager._track(
@@ -748,7 +750,7 @@ class RtspClientConnection:
                     )
                 )
                 try:
-                    sess = await asyncio.wait_for(asyncio.shield(task), 25.0)
+                    sess = await asyncio.wait_for(asyncio.shield(task), 45.0)
                 except asyncio.TimeoutError:
                     sess = None
                 if sess is None:
