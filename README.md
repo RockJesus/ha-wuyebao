@@ -166,6 +166,11 @@ Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业�
 <details>
 <summary>📋 更新日志（点击展开）</summary>
 
+### v7.2.0
+- **彻底修复摄像头实体卡 `unavailable`（v7.1.9 修复仍不彻底）**
+  - 根因：Home Assistant 2026.9 的 `Camera` 基类已移除内部 `_streams` 属性（改用 `_attr_is_streaming`/`is_streaming`），v7.1.9 重写的 `state` property 引用了不存在的 `_streams`，导致实体写状态时抛 `AttributeError`、状态更新失败而卡在 `unavailable`
+  - 修复：`state` property 改用基类同款逻辑（`is_recording` / `is_streaming` / `CameraState` 枚举），与 HA 2026.9 官方实现完全一致；配合 `available` property 恒为 True，流打开失败时实体保持 `idle` 可点击重试，不再灰化为 `unavailable`
+
 ### v7.1.9
 - **彻底修复摄像头实体卡 `unavailable`**（v7.1.8 修复不彻底）
   - 根因：Home Assistant 的 `Camera` 基类把 `available` 与 `state` 都硬编码为随 stream 状态变化（`_stream_unavailable` 为真时实体直接变为 `unavailable`），类属性 `_attr_available` 会被基类 property 覆盖，无法阻止

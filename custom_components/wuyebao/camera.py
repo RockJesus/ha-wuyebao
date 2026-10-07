@@ -15,7 +15,7 @@ from typing import Any
 from homeassistant.components.camera import (
     Camera,
     CameraEntityFeature,
-    CameraEntityState,
+    CameraState,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -178,11 +178,18 @@ class WuYeBaoCamera(Camera):
         return True
 
     @property
-    def state(self) -> CameraEntityState:
-        """Return idle/streaming instead of unavailable (see available)."""
-        if self._streams:
-            return CameraEntityState.STREAMING
-        return CameraEntityState.IDLE
+    def state(self) -> CameraState:
+        """Return idle/streaming instead of unavailable (see available).
+
+        Mirror the HA 2026.9 Camera base-class logic (is_recording /
+        is_streaming backed by _attr_is_recording/_attr_is_streaming); do
+        NOT touch internal stream state directly.
+        """
+        if self.is_recording:
+            return CameraState.RECORDING
+        if self.is_streaming:
+            return CameraState.STREAMING
+        return CameraState.IDLE
 
     def __init__(
         self,
@@ -260,11 +267,13 @@ class WuYeBaoLiveCamera(Camera):
         return True
 
     @property
-    def state(self) -> CameraEntityState:
+    def state(self) -> CameraState:
         """Return idle/streaming instead of unavailable (see WuYeBaoCamera)."""
-        if self._streams:
-            return CameraEntityState.STREAMING
-        return CameraEntityState.IDLE
+        if self.is_recording:
+            return CameraState.RECORDING
+        if self.is_streaming:
+            return CameraState.STREAMING
+        return CameraState.IDLE
 
     def __init__(
         self,
