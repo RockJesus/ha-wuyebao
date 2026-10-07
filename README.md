@@ -166,6 +166,11 @@ Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业�
 <details>
 <summary>📋 更新日志（点击展开）</summary>
 
+### v7.2.1
+- **修复"来访自动开门"对部分门漏触发**
+  - 根因：呼叫记录轮询（自动开门 / 最近访客快照共用）只拉最近 20 条，小区门数多于 20 时，某些门的最新呼叫会被更繁忙的门挤出窗口，导致该门自动开门 / 访客快照检测不到新来电
+  - 修复：呼叫记录拉取 `page_size` 20→50，覆盖全部小区门（26+）并留余量；自动开门轮询 3 秒一次，检测到新来电且开关开启时立即开门
+
 ### v7.2.0
 - **彻底修复摄像头实体卡 `unavailable`（v7.1.9 修复仍不彻底）**
   - 根因：Home Assistant 2026.9 的 `Camera` 基类已移除内部 `_streams` 属性（改用 `_attr_is_streaming`/`is_streaming`），v7.1.9 重写的 `state` property 引用了不存在的 `_streams`，导致实体写状态时抛 `AttributeError`、状态更新失败而卡在 `unavailable`

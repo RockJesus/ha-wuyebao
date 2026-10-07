@@ -485,7 +485,12 @@ class WuYeBaoClient:
         visitor auto-open poller so a single API call covers every gate.
         """
         try:
-            calls = await self.get_calls(page=1, page_size=20)
+            # page_size must comfortably exceed the number of gates in the
+            # community: with 26 gates a 20-record window can push a gate's
+            # newest call out, so its auto-open/visitor-snapshot would be
+            # missed until the next poll cycle (or never, if that gate keeps
+            # being superseded by busier gates).
+            calls = await self.get_calls(page=1, page_size=50)
         except Exception as err:
             _LOGGER.warning("Failed to get call records: %s", err)
             return {}
@@ -518,7 +523,7 @@ class WuYeBaoClient:
         Returns {"url", "time", "deviceNumber", "devicesType", "callType"}.
         """
         try:
-            calls = await self.get_calls(page=1, page_size=20)
+            calls = await self.get_calls(page=1, page_size=50)
         except Exception as err:
             _LOGGER.warning("Failed to get call records: %s", err)
             return None

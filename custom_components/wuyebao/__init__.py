@@ -51,7 +51,7 @@ async def _hub_data_poller(
                 "face": client.get_face_info(),
                 "contents": client.get_contents(),
                 "alarms": client.get_alarms(),
-                "call_records": client.get_calls(page=1, page_size=20),
+                "call_records": client.get_calls(page=1, page_size=50),
             }
             results = await asyncio.gather(*tasks.values(), return_exceptions=True)
             for key, res in zip(tasks, results):
