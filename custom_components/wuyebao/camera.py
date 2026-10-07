@@ -12,7 +12,11 @@ import asyncio
 import logging
 from typing import Any
 
-from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.components.camera import (
+    Camera,
+    CameraEntityFeature,
+    CameraEntityState,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -158,12 +162,27 @@ class WuYeBaoCamera(Camera):
     _attr_name = "最近访客"
     _attr_icon = "mdi:account-arrow-right-outline"
     _attr_frame_interval = 30.0
-    # Never report unavailable: HA marks a Camera that advertises STREAM as
-    # unavailable when the stream worker fails to open the RTSP source
-    # (e.g. the SIP monitor session is still building under video-wall
-    # multi-stream load).  The entity keeps its last state and remains
-    # clickable for a retry instead of being greyed out.
-    _attr_available = True
+
+    @property
+    def available(self) -> bool:
+        """Never report unavailable.
+
+        HA's Camera base class overrides ``available`` with
+        ``self._stream_unavailable is False`` and marks a STREAM-advertising
+        camera unavailable when its stream worker fails to open the RTSP
+        source (e.g. the SIP monitor session is still building under
+        video-wall multi-stream load).  Overriding the property keeps the
+        entity available with its last state and clickable for a retry
+        instead of being greyed out.
+        """
+        return True
+
+    @property
+    def state(self) -> CameraEntityState:
+        """Return idle/streaming instead of unavailable (see available)."""
+        if self._streams:
+            return CameraEntityState.STREAMING
+        return CameraEntityState.IDLE
 
     def __init__(
         self,
@@ -234,10 +253,18 @@ class WuYeBaoLiveCamera(Camera):
     _attr_name = "实时监控"
     _attr_icon = "mdi:video-wireless"
     _attr_frame_interval = 10.0
-    # Never report unavailable (see WuYeBaoCamera): under video-wall
-    # multi-stream load the SIP call / RTSP session may still be building;
-    # keep the entity available and idle so the user can retry.
-    _attr_available = True
+
+    @property
+    def available(self) -> bool:
+        """Never report unavailable (see WuYeBaoCamera)."""
+        return True
+
+    @property
+    def state(self) -> CameraEntityState:
+        """Return idle/streaming instead of unavailable (see WuYeBaoCamera)."""
+        if self._streams:
+            return CameraEntityState.STREAMING
+        return CameraEntityState.IDLE
 
     def __init__(
         self,

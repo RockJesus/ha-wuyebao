@@ -166,6 +166,11 @@ Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业�
 <details>
 <summary>📋 更新日志（点击展开）</summary>
 
+### v7.1.9
+- **彻底修复摄像头实体卡 `unavailable`**（v7.1.8 修复不彻底）
+  - 根因：Home Assistant 的 `Camera` 基类把 `available` 与 `state` 都硬编码为随 stream 状态变化（`_stream_unavailable` 为真时实体直接变为 `unavailable`），类属性 `_attr_available` 会被基类 property 覆盖，无法阻止
+  - 修复：在摄像头实体中**显式 override `available` property（恒为 True）与 `state` property（`streaming`/`idle`）**，流打开失败时实体保持 `idle` 可点击重试，不再灰化为 `unavailable`；同时保留 v7.1.8 的 45s 会话建立等待与 404 快速放弃逻辑
+
 ### v7.1.8
 - **修复视频墙（多路同时观看）场景下实时监控大量失败、摄像头实体卡 `unavailable`**
   - 根因：视频墙同时拉起多路 SIP 监控呼叫时，门禁设备/网关繁忙，部分呼叫建立耗时超过 RTSP 服务器 25s 的等待窗口，DESCRIBE 返回空 SDP，HA 内置 stream 打开失败后把摄像头实体标记为 `unavailable`（且不会自动恢复）
