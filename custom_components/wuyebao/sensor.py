@@ -416,7 +416,7 @@ class WuYeBaoVisitorSensor(_WuYeBaoHubSensor):
 
     def _value_from(self, data: Any) -> Any:
         if not isinstance(data, list) or not data:
-            return None
+            return "暂无"
         import time as _time
 
         now_ms = int(_time.time() * 1000)
@@ -433,7 +433,7 @@ class WuYeBaoVisitorSensor(_WuYeBaoHubSensor):
                     newest_valid = pwd
             except (TypeError, ValueError):
                 pass
-        return newest_valid or newest_any
+        return newest_valid or newest_any or "暂无"
 
     def _attrs_from(self, data: Any) -> dict[str, Any]:
         if not isinstance(data, list) or not data:

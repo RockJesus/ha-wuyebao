@@ -166,6 +166,11 @@ Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业�
 <details>
 <summary>📋 更新日志（点击展开）</summary>
 
+### v7.2.3
+- **实体状态优化**：所有按钮（生成访客码/呼叫电梯/户户通呼叫）默认状态改为 `off`，不再显示 `unknown`
+- **访客开门码**：无有效访客码时显示"暂无"，不再显示 `unknown`
+- 个别小区门监控 INVITE 404 确认是设备云端离线（App 同样无法监控），集成侧无需修改
+
 ### v7.2.2
 - **manifest 规范修复**：移除 `loggers` 中的集成自身条目（官方规范：`loggers` 仅用于声明 requirements 依赖包的 logger；本集成无外部依赖，写自身不符合规范）
 - **config flow 补全**：新增 `async_step_reauth`（凭证失效重新认证入口）与 `async_step_reconfigure`（HA 2026.x 前端保存配置入口），登录验证逻辑与初始设置共用

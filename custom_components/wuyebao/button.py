@@ -172,6 +172,7 @@ class WuYeBaoVisitorButton(ButtonEntity):
     _attr_has_entity_name = True
     _attr_name = "生成访客码"
     _attr_icon = "mdi:account-key-plus"
+    _attr_state = "off"
 
     def __init__(
         self,
@@ -227,6 +228,7 @@ class WuYeBaoElevatorButton(ButtonEntity):
     _attr_has_entity_name = True
     _attr_name = "呼叫电梯"
     _attr_icon = "mdi:elevator"
+    _attr_state = "off"
 
     def __init__(
         self,
@@ -279,6 +281,7 @@ class WuYeBaoHouseholdButton(ButtonEntity):
     _attr_has_entity_name = True
     _attr_name = "户户通呼叫"
     _attr_icon = "mdi:phone-in-talk"
+    _attr_state = "off"
 
     def __init__(
         self,
