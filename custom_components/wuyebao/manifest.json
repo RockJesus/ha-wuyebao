@@ -9,9 +9,6 @@
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/RockJesus/ha-wuyebao/issues",
-  "loggers": [
-    "custom_components.wuyebao"
-  ],
   "requirements": [],
-  "version": "7.2.1"
+  "version": "7.2.2"
 }

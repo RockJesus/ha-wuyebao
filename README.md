@@ -166,6 +166,11 @@ Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业�
 <details>
 <summary>📋 更新日志（点击展开）</summary>
 
+### v7.2.2
+- **manifest 规范修复**：移除 `loggers` 中的集成自身条目（官方规范：`loggers` 仅用于声明 requirements 依赖包的 logger；本集成无外部依赖，写自身不符合规范）
+- **config flow 补全**：新增 `async_step_reauth`（凭证失效重新认证入口）与 `async_step_reconfigure`（HA 2026.x 前端保存配置入口），登录验证逻辑与初始设置共用
+- 保持 `hacs.json` 规范状态（无 `domains`/`iot_class` 键、`homeassistant` 裸版本号），键序 `domain`/`name` 在前 + 其余字母序
+
 ### v7.2.1
 - **修复"来访自动开门"对部分门漏触发**
   - 根因：呼叫记录轮询（自动开门 / 最近访客快照共用）只拉最近 20 条，小区门数多于 20 时，某些门的最新呼叫会被更繁忙的门挤出窗口，导致该门自动开门 / 访客快照检测不到新来电
