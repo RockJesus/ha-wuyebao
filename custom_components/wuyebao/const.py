@@ -28,7 +28,7 @@ API_CALLS = "/api/call/{page}/{page_size}/grant/calls"
 # Community call-records TTL cache (visitor snapshots / auto-open):
 # 26 camera entities + the 3s visitor poller + the hub poller share
 # one /api/call list fetch per TTL instead of ~70 requests/min.
-CALLS_CACHE_TTL = 5.0
+CALLS_CACHE_TTL = 10.0
 API_ALARMS = "/api/alarm/grant/alarms"
 API_REPAIRS = "/api/repair/repairs"
 API_INVITE_VISITORS = "/api/invitevisitor/grant/invitevisitors"

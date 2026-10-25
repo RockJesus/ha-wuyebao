@@ -27,7 +27,7 @@ PLATFORMS: list[Platform] = [
 ]
 
 # Visitor auto-open: poll call records and open doors whose switch is ON.
-CALL_POLL_INTERVAL = 3.0
+CALL_POLL_INTERVAL = 10.0
 
 # Hub-level sensors (repairs / visitors / face / contents / alarms) refresh.
 HUB_POLL_INTERVAL = 60.0
