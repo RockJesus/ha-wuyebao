@@ -204,6 +204,11 @@ class WuYeBaoCamera(Camera):
         self._entry_id = entry_id
         self._gid = _gate_id(gate)
         self._last_visit_time: Any = None
+        # Snapshot bytes cache: only re-download when the visitor snapshot
+        # URL changes, so 26 camera entities do not re-fetch identical
+        # images on every HA camera poll (request-volume reduction).
+        self._last_image: bytes | None = None
+        self._last_image_url: str | None = None
 
         self._attr_unique_id = f"{entry_id}_camera_{self._gid}"
         self._attr_device_info = self._build_device_info(gate)
@@ -237,8 +242,15 @@ class WuYeBaoCamera(Camera):
                 if info.get("time") and info.get("time") != self._last_visit_time:
                     self._last_visit_time = info.get("time")
                     self.async_write_ha_state()
-                data = await self._client.download_image(info["url"])
+                url = info.get("url")
+                # No new snapshot since last fetch: reuse the cached bytes
+                # instead of re-downloading the same image every poll.
+                if url and url == self._last_image_url and self._last_image:
+                    return self._last_image
+                data = await self._client.download_image(url)
                 if data:
+                    self._last_image = data
+                    self._last_image_url = url
                     return data
                 _LOGGER.warning("Camera %s: image download failed", self.name)
         except Exception as err:

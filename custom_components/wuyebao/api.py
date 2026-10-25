@@ -93,6 +93,15 @@ class WuYeBaoClient:
         self.gates: list[dict[str, Any]] | None = None
         self._gates_lock = asyncio.Lock()
 
+        # Call-records cache (visitor snapshots / auto-open).  26 camera
+        # entities + the 3s visitor poller + the hub poller all call
+        # get_calls(); without a TTL cache the same /api/call list is
+        # requested ~70x/min, which risks cloud rate-limiting / WAF blocks
+        # (a frequent-request symptom observed on some gates).  5s TTL keeps
+        # the auto-open latency <=5s while cutting request volume by ~80%.
+        self._calls_cache: list[dict[str, Any]] | None = None
+        self._calls_cache_ts: float = 0.0
+
     @property
     def access_token(self) -> str | None:
         """Return access token."""
@@ -279,6 +288,8 @@ class WuYeBaoClient:
                 self.owner_id = str(owner.get("id", ""))
                 if owner.get("userId"):
                     self.user_id = str(owner.get("userId"))
+            self._calls_cache = raw
+            self._calls_cache_ts = time.time()
             return raw
         return []
 
@@ -419,12 +430,28 @@ class WuYeBaoClient:
         records from the user's own unit door, making every other gate show
         that unit's picture (cross-gate image mix-up).
         """
+        # TTL cache shared by every caller (camera snapshots, visitor
+        # auto-open poller, hub poller): the community call list is fetched
+        # once per CALLS_CACHE_TTL instead of once per entity per poll.
+        now = time.time()
+        if self._calls_cache is not None and now - self._calls_cache_ts < CALLS_CACHE_TTL:
+            return self._calls_cache
+
         params: dict[str, Any] = {}
         if self.community_id:
             params["communityId"] = self.community_id
 
         path = API_CALLS.format(page=page, page_size=page_size)
-        data = await self._request("GET", path, token=self._access_token, params=params)
+        try:
+            data = await self._request(
+                "GET", path, token=self._access_token, params=params
+            )
+        except Exception:
+            # On transient failure prefer the last known list (entities keep
+            # their last state) over re-raising and leaving cameras blank.
+            if self._calls_cache is not None:
+                return self._calls_cache
+            raise
         raw = data.get("data", data)
         if isinstance(raw, list):
             return raw
