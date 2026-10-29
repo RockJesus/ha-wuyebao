@@ -243,6 +243,10 @@ class WuYeBaoCamera(Camera):
                     self._last_visit_time = info.get("time")
                     self.async_write_ha_state()
                 url = info.get("url")
+                if not url:
+                    # No snapshot URL in this gate's latest record: keep the
+                    # cached picture (or None) instead of download_image(None).
+                    return self._last_image if self._last_image else None
                 # No new snapshot since last fetch: reuse the cached bytes
                 # instead of re-downloading the same image every poll.
                 if url and url == self._last_image_url and self._last_image:

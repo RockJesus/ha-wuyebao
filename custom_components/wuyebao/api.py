@@ -420,7 +420,7 @@ class WuYeBaoClient:
             _LOGGER.warning("Failed to resolve room from binding code: %s", err)
 
     async def get_calls(
-        self, page: int = 1, page_size: int = 20
+        self, page: int = 1, page_size: int = 200
     ) -> list[dict[str, Any]]:
         """Get call records (contain door camera snapshot images).
 
@@ -518,7 +518,7 @@ class WuYeBaoClient:
             # newest call out, so its auto-open/visitor-snapshot would be
             # missed until the next poll cycle (or never, if that gate keeps
             # being superseded by busier gates).
-            calls = await self.get_calls(page=1, page_size=50)
+            calls = await self.get_calls(page=1, page_size=200)
         except Exception as err:
             _LOGGER.warning("Failed to get call records: %s", err)
             return {}
@@ -551,7 +551,7 @@ class WuYeBaoClient:
         Returns {"url", "time", "deviceNumber", "devicesType", "callType"}.
         """
         try:
-            calls = await self.get_calls(page=1, page_size=50)
+            calls = await self.get_calls(page=1, page_size=200)
         except Exception as err:
             _LOGGER.warning("Failed to get call records: %s", err)
             return None
