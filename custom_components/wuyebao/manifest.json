@@ -1,14 +1,14 @@
 {
-  "domain": "wuyebao",
-  "name": "物业宝",
-  "codeowners": [
-    "@RockJesus"
-  ],
-  "config_flow": true,
-  "documentation": "https://github.com/RockJesus/ha-wuyebao",
-  "integration_type": "hub",
-  "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/RockJesus/ha-wuyebao/issues",
-  "requirements": [],
-  "version": "7.2.7"
+    "domain": "wuyebao",
+    "name": "物业宝",
+    "codeowners": [
+        "@RockJesus"
+    ],
+    "config_flow": true,
+    "documentation": "https://github.com/RockJesus/ha-wuyebao",
+    "integration_type": "hub",
+    "iot_class": "cloud_polling",
+    "issue_tracker": "https://github.com/RockJesus/ha-wuyebao/issues",
+    "requirements": [],
+    "version": "7.2.8"
 }
