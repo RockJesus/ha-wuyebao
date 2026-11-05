@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import entity_registry as er
 
-from .const import CONF_PASSWORD, CONF_USERNAME, DOMAIN
+from .const import CONF_PASSWORD, CONF_USERNAME, DOMAIN, EVENT_VISITOR_CALL
 from .api import WuYeBaoClient
 from .rtsp_server import RtspServer, VideoSessionManager
 
@@ -72,16 +72,37 @@ async def _visitor_call_poller(
     auto_open_state: dict[str, bool],
     gates: list[dict[str, Any]],
 ) -> None:
-    """Poll call records; auto-open gates whose "来访自动开门" switch is ON.
+    """Poll call records; fire visitor-call events and auto-open gates.
 
     On startup the poller only learns the current call tokens (so an old call
     is never re-triggered).  Afterwards, whenever a NEW call token appears for
-    a gate and that gate's switch is ON, the door is opened immediately.
+    a gate the poller:
+
+    1. validates the call belongs to the owner's OWN unit before doing
+       anything (issue #1: community-wide spam).  Unit doors are verified
+       against the server-side binding-code filtered call list; wall gates
+       (no unitId) are community entrances and always pass;
+    2. fires the ``wuyebao_visitor_call`` event so automations can notify
+       precisely for the owner's unit;
+    3. opens the door if that gate's "来访自动开门" switch is ON.
     """
     _LOGGER.info("Visitor auto-open poller started for %d gates", len(gates))
     seen: dict[str, str] = {}
     while True:
         try:
+            # Server-side filtered list: only the owner's own unit door calls
+            # (binding code filter, issue #1).  Falls back to a unitId
+            # comparison when the binding code is not available.
+            try:
+                unit_calls = await client.get_calls(
+                    page=1, page_size=200, call_number=client.binding_code
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Own-unit call fetch failed: %s", err)
+                unit_calls = None
+            unit_tokens = (
+                {client._call_token(c) for c in unit_calls} if unit_calls else set()
+            )
             per_gate = await client.get_latest_calls_per_gate(gates)
             for gid, call in per_gate.items():
                 token = client._call_token(call)
@@ -89,30 +110,81 @@ async def _visitor_call_poller(
                 if prev is None:
                     seen[gid] = token
                     continue
-                if token != prev:
-                    seen[gid] = token
-                    if auto_open_state.get(gid):
-                        gate = next(
-                            (
-                                g
-                                for g in gates
-                                if str(
-                                    g.get("id")
-                                    or g.get("uid")
-                                    or g.get("deviceNumber")
-                                    or "unknown"
-                                )
-                                == gid
-                            ),
-                            None,
+                if token == prev:
+                    continue
+                seen[gid] = token
+                gate = next(
+                    (
+                        g
+                        for g in gates
+                        if str(
+                            g.get("id")
+                            or g.get("uid")
+                            or g.get("deviceNumber")
+                            or "unknown"
                         )
-                        if gate is None:
-                            continue
-                        _LOGGER.info("Visitor call at gate %s -> auto open", gid)
-                        try:
-                            await client.open_door_sip(gate)
-                        except Exception as err:  # noqa: BLE001
-                            _LOGGER.warning("Auto-open gate %s failed: %s", gid, err)
+                        == gid
+                    ),
+                    None,
+                )
+                if gate is None:
+                    continue
+                gate_unit = str(gate.get("unitId") or "")
+                if gate_unit:
+                    # Unit door: only react when the call is really for the
+                    # owner's own unit (issue #1).
+                    if unit_calls is not None:
+                        own_unit = token in unit_tokens
+                    elif client.unit_id:
+                        own_unit = str(call.get("unitId") or "") == client.unit_id
+                    else:
+                        # No way to verify - keep legacy behaviour.
+                        own_unit = True
+                else:
+                    # Wall gate (community entrance): relevant for everyone.
+                    own_unit = True
+                if not own_unit:
+                    _LOGGER.debug(
+                        "Call at gate %s belongs to another unit - ignored", gid
+                    )
+                    continue
+                ts = next(
+                    (
+                        call.get(k)
+                        for k in (
+                            "createTime",
+                            "callTime",
+                            "time",
+                            "visitTime",
+                            "createDate",
+                        )
+                        if call.get(k)
+                    ),
+                    None,
+                )
+                alias = gate.get("alias") or gate.get("name") or ""
+                hass.bus.async_fire(
+                    EVENT_VISITOR_CALL,
+                    {
+                        "gate_id": gid,
+                        "gate_name": alias,
+                        "device_number": call.get("deviceNumber"),
+                        "devices_type": call.get("devicesType"),
+                        "unit_id": call.get("unitId") or gate.get("unitId"),
+                        "building_id": call.get("buildingId") or gate.get("buildingId"),
+                        "call_type": call.get("callType"),
+                        "time": ts,
+                        "image_url": call.get("imageUrl"),
+                        "is_unit_door": gate_unit != "",
+                    },
+                )
+                _LOGGER.info("Visitor call at gate %s (own unit)", gid)
+                if auto_open_state.get(gid):
+                    _LOGGER.info("Visitor call at gate %s -> auto open", gid)
+                    try:
+                        await client.open_door_sip(gate)
+                    except Exception as err:  # noqa: BLE001
+                        _LOGGER.warning("Auto-open gate %s failed: %s", gid, err)
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001 - polling must never die
