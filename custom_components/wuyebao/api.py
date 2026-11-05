@@ -578,39 +578,24 @@ class WuYeBaoClient:
              without a unitId/buildingId (wall gates a/b are unique).
         Returns {"url", "time", "deviceNumber", "devicesType", "callType"}.
 
-        Privacy (HACS review): unit doors must only ever show calls for the
-        OWNER'S OWN unit.  Unit doors with a unitId use the server-side
-        binding-code filtered list; unit doors without a unitId are hidden
-        entirely (their call records cannot be attributed to a single flat);
-        only wall gates (community entrances) use the community-wide list.
+        Privacy (HACS review round 2): ONLY calls addressed to the owner's
+        own flat (binding code / callNumber) are shown, for every gate type -
+        unitId matching is not enough because a unit door serves several
+        flats, and wall gates are shared entrances.  Without a binding code
+        nothing is shown.
         """
-        gate_unit = str(gate.get("unitId") or "")
-        gate_building = str(gate.get("buildingId") or "")
+        if not self.binding_code:
+            return None
         try:
-            if gate_unit:
-                calls = await self.get_calls(
-                    page=1, page_size=200, call_number=self.binding_code
-                )
-                if not calls:
-                    return None
-            elif gate_building:
-                # Unit door without unitId: the record cannot be attributed
-                # to one flat - do not expose other households' visitors.
-                if not self.unit_id:
-                    return None
-                community = await self.get_calls(page=1, page_size=200)
-                calls = [
-                    c
-                    for c in community
-                    if str(c.get("unitId") or "") == self.unit_id
-                ]
-                if not calls:
-                    return None
-            else:
-                calls = await self.get_calls(page=1, page_size=200)
+            calls = await self.get_calls(
+                page=1, page_size=200, call_number=self.binding_code
+            )
         except Exception as err:
             _LOGGER.warning("Failed to get call records: %s", err)
             return None
+        # Belt and braces: only records explicitly addressed to our own
+        # binding number.
+        calls = [c for c in calls if c.get("callNumber") == self.binding_code]
 
         if not calls:
             return None
