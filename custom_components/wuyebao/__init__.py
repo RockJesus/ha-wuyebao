@@ -168,7 +168,7 @@ async def _visitor_call_poller(
                         "call_type": call.get("callType"),
                         "time": ts,
                         "image_url": call.get("imageUrl"),
-                        "is_unit_door": gate_unit != "",
+                        "is_unit_door": bool(gate.get("unitId")),
                     },
                 )
                 _LOGGER.info("Visitor call at gate %s (own unit)", gid)
@@ -180,8 +180,10 @@ async def _visitor_call_poller(
                         _LOGGER.warning("Auto-open gate %s failed: %s", gid, err)
         except asyncio.CancelledError:
             raise
-        except Exception as err:  # noqa: BLE001 - polling must never die
-            _LOGGER.debug("Visitor call poll error: %s", err)
+        except Exception:  # noqa: BLE001 - polling must never die
+            # Log with traceback: a silent debug-level message previously hid
+            # a NameError that disabled the event and auto-open entirely.
+            _LOGGER.exception("Visitor call poll error")
         await asyncio.sleep(CALL_POLL_INTERVAL)
 
 
