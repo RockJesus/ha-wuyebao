@@ -190,10 +190,25 @@ class WuYeBaoCallsImage(_WuYeBaoHubImage):
         """Initialize the calls image entity."""
         super().__init__(hass, client, entry_id, "call_records")
 
-    def _extract_url(self, data: Any) -> str | None:
+    def _own_records(self, data: Any) -> list[dict[str, Any]]:
+        """Privacy (HACS review): only the owner's own unit call records."""
         if not isinstance(data, list) or not data:
-            return None
-        for c in data:
+            return []
+        unit_id = str(self._client.unit_id or "")
+        binding = self._client.binding_code
+        if unit_id:
+            return [
+                c
+                for c in data
+                if str(c.get("unitId") or "") == unit_id
+                or (binding and c.get("callNumber") == binding)
+            ]
+        if binding:
+            return [c for c in data if c.get("callNumber") == binding]
+        return []
+
+    def _extract_url(self, data: Any) -> str | None:
+        for c in self._own_records(data):
             url = c.get("imageUrl")
             if url:
                 return str(url)
@@ -202,8 +217,8 @@ class WuYeBaoCallsImage(_WuYeBaoHubImage):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Call metadata for diagnostics."""
-        data = self._client.hub_data.get("call_records")
-        if not isinstance(data, list) or not data:
+        data = self._own_records(self._client.hub_data.get("call_records"))
+        if not data:
             return {"count": 0, "latest": None}
         import time as _time
 
@@ -217,7 +232,6 @@ class WuYeBaoCallsImage(_WuYeBaoHubImage):
                 {
                     "time": ts_fmt,
                     "device": c.get("accessInfo") or c.get("deviceNumber"),
-                    "call_number": c.get("callNumber"),
                     "type": c.get("devicesType"),
                     "state": c.get("state"),
                 }

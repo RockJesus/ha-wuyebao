@@ -148,7 +148,6 @@ class WuYeBaoClient:
             headers=headers,
             json=payload if payload is not None else None,
             params=params,
-            ssl=False,
         ) as resp:
             data = await resp.json(content_type=None)
 
@@ -216,7 +215,6 @@ class WuYeBaoClient:
         async with self._session.get(
             f"{self.base_url}{API_CLIENT_TOKEN}",
             headers=headers,
-            ssl=False,
         ) as resp:
             data = await resp.json(content_type=None)
 
@@ -579,9 +577,37 @@ class WuYeBaoClient:
           3. final fallback by deviceNumber + devicesType ONLY for gates
              without a unitId/buildingId (wall gates a/b are unique).
         Returns {"url", "time", "deviceNumber", "devicesType", "callType"}.
+
+        Privacy (HACS review): unit doors must only ever show calls for the
+        OWNER'S OWN unit.  Unit doors with a unitId use the server-side
+        binding-code filtered list; unit doors without a unitId are hidden
+        entirely (their call records cannot be attributed to a single flat);
+        only wall gates (community entrances) use the community-wide list.
         """
+        gate_unit = str(gate.get("unitId") or "")
+        gate_building = str(gate.get("buildingId") or "")
         try:
-            calls = await self.get_calls(page=1, page_size=200)
+            if gate_unit:
+                calls = await self.get_calls(
+                    page=1, page_size=200, call_number=self.binding_code
+                )
+                if not calls:
+                    return None
+            elif gate_building:
+                # Unit door without unitId: the record cannot be attributed
+                # to one flat - do not expose other households' visitors.
+                if not self.unit_id:
+                    return None
+                community = await self.get_calls(page=1, page_size=200)
+                calls = [
+                    c
+                    for c in community
+                    if str(c.get("unitId") or "") == self.unit_id
+                ]
+                if not calls:
+                    return None
+            else:
+                calls = await self.get_calls(page=1, page_size=200)
         except Exception as err:
             _LOGGER.warning("Failed to get call records: %s", err)
             return None
@@ -830,7 +856,7 @@ class WuYeBaoClient:
         """Download image bytes from a URL."""
         try:
             async with self._session.get(
-                url, ssl=False, timeout=aiohttp.ClientTimeout(total=15)
+                url, timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
                 if resp.status == 200:
                     return await resp.read()

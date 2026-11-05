@@ -174,8 +174,11 @@ class WuYeBaoUserSensor(SensorEntity):
 
     @property
     def native_value(self) -> str:
-        """Return the state of the sensor."""
-        return self._client.username
+        """Return a MASKED phone number (privacy: HACS review)."""
+        phone = str(self._client.username or "")
+        if len(phone) >= 8 and phone.isdigit():
+            return f"{phone[:3]}****{phone[-4:]}"
+        return phone
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -415,25 +418,27 @@ class WuYeBaoVisitorSensor(_WuYeBaoHubSensor):
         super().__init__(client, entry_id, "visitors")
 
     def _value_from(self, data: Any) -> Any:
+        """Return the NUMBER of active visitor codes.
+
+        Security (HACS review): the door-opening password must never appear
+        in entity state / attributes / logs - it is only shown once in the
+        persistent notification right after the 访客邀请 button is pressed.
+        """
         if not isinstance(data, list) or not data:
-            return "暂无"
+            return 0
         import time as _time
 
         now_ms = int(_time.time() * 1000)
-        newest_valid = None
-        newest_any = None
+        active = 0
         for v in data:
             start = v.get("startTime") or v.get("start_time")
             end = v.get("endTime") or v.get("end_time")
-            pwd = v.get("password")
-            if newest_any is None:
-                newest_any = pwd
             try:
-                if pwd and int(start) <= now_ms <= int(end):
-                    newest_valid = pwd
+                if v.get("password") and int(start) <= now_ms <= int(end):
+                    active += 1
             except (TypeError, ValueError):
                 pass
-        return newest_valid or newest_any or "暂无"
+        return active
 
     def _attrs_from(self, data: Any) -> dict[str, Any]:
         if not isinstance(data, list) or not data:
@@ -463,7 +468,6 @@ class WuYeBaoVisitorSensor(_WuYeBaoHubSensor):
             codes.append(
                 {
                     "id": v.get("id"),
-                    "password": v.get("password"),
                     "start_time": start_fmt,
                     "end_time": end_fmt,
                     "start_time_ms": start,
@@ -475,10 +479,6 @@ class WuYeBaoVisitorSensor(_WuYeBaoHubSensor):
         return {
             "count": len(data),
             "active": len(active),
-            "password": codes[0].get("password"),
-            "valid": codes[0].get("valid"),
-            "start_time": codes[0].get("start_time"),
-            "end_time": codes[0].get("end_time"),
             "codes": codes,
         }
 

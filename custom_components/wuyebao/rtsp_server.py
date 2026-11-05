@@ -18,7 +18,7 @@ from .sip_video import SipMonitorCall
 
 _LOGGER = logging.getLogger(__name__)
 
-RTSP_HOST = "0.0.0.0"
+RTSP_HOST = "127.0.0.1"
 RTSP_PORT = 8556
 # Idle-stop policy (seconds without RTSP clients -> BYE):
 #  - IDLE_STOP_AFTER: session that HAS delivered media and is then closed.

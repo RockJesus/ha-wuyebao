@@ -212,7 +212,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     try:
         await client.login()
-        _LOGGER.info("Logged in as %s, community: %s", client.username, client.community_name)
+        _phone = str(client.username or "")
+        _masked = f"{_phone[:3]}****{_phone[-4:]}" if len(_phone) >= 8 and _phone.isdigit() else _phone
+        _LOGGER.info("Logged in as %s, community: %s", _masked, client.community_name)
         _LOGGER.info("SIP token: %s", "obtained" if client.sip_jwt else "not available")
         # Fetch owner info (contains bindingCode for camera call records and
         # auto-resolves the owner's room for elevator/户户通 calls).
