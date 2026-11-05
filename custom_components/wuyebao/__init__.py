@@ -90,19 +90,20 @@ async def _visitor_call_poller(
     seen: dict[str, str] = {}
     while True:
         try:
-            # Server-side filtered list: only the owner's own unit door calls
-            # (binding code filter, issue #1).  Falls back to a unitId
-            # comparison when the binding code is not available.
-            try:
-                unit_calls = await client.get_calls(
-                    page=1, page_size=200, call_number=client.binding_code
-                )
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Own-unit call fetch failed: %s", err)
-                unit_calls = None
-            unit_tokens = (
-                {client._call_token(c) for c in unit_calls} if unit_calls else set()
-            )
+            # Server-side filtered list: ONLY the calls addressed to the
+            # owner's own flat (binding code filter, HACS review round 2).
+            # Without a binding code we must NOT fall back to the community
+            # list - that would treat every household's call as our own.
+            unit_calls: list[dict[str, Any]] = []
+            if client.binding_code:
+                try:
+                    unit_calls = await client.get_calls(
+                        page=1, page_size=200, call_number=client.binding_code
+                    )
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Own-unit call fetch failed: %s", err)
+                    unit_calls = []
+            unit_tokens = {client._call_token(c) for c in unit_calls}
             per_gate = await client.get_latest_calls_per_gate(gates)
             for gid, call in per_gate.items():
                 token = client._call_token(call)
@@ -129,20 +130,12 @@ async def _visitor_call_poller(
                 )
                 if gate is None:
                     continue
-                gate_unit = str(gate.get("unitId") or "")
-                if gate_unit:
-                    # Unit door: only react when the call is really for the
-                    # owner's own unit (issue #1).
-                    if unit_calls is not None:
-                        own_unit = token in unit_tokens
-                    elif client.unit_id:
-                        own_unit = str(call.get("unitId") or "") == client.unit_id
-                    else:
-                        # No way to verify - keep legacy behaviour.
-                        own_unit = True
-                else:
-                    # Wall gate (community entrance): relevant for everyone.
-                    own_unit = True
+                # HACS review round 2: EVERY gate (unit doors AND wall
+                # gates) only reacts to calls addressed to the owner's own
+                # flat.  Wall gates are shared entrances too - opening them
+                # for another household's visitor is wrong.  If the call
+                # cannot be verified as ours, do nothing.
+                own_unit = token in unit_tokens
                 if not own_unit:
                     _LOGGER.debug(
                         "Call at gate %s belongs to another unit - ignored", gid

@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
-from urllib.parse import urlparse
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -37,23 +36,10 @@ async def async_setup_entry(
     """Set up 物业宝 sensors based on a config entry."""
     client: WuYeBaoClient = hass.data[DOMAIN][entry.entry_id]
 
-    # Host for the built-in RTSP server: prefer the HAOS host's LAN IP
-    # (the RTSP server runs on the same machine as HA), fall back to the
-    # external URL host, then localhost.
-    rtsp_host = "localhost"
-    api_cfg = getattr(hass.config, "api", None)
-    if api_cfg is not None:
-        local_ip = getattr(api_cfg, "local_ip", None)
-        if local_ip:
-            rtsp_host = local_ip
-    if rtsp_host == "localhost":
-        try:
-            ext = hass.config.get_url()
-            host = urlparse(ext).hostname
-            if host:
-                rtsp_host = host
-        except Exception:  # noqa: BLE001
-            pass
+    # The built-in RTSP server binds 127.0.0.1 only (HACS review: no
+    # unauthenticated LAN exposure).  Advertise the loopback address and
+    # note it is only reachable from the Home Assistant host itself.
+    rtsp_host = "127.0.0.1"
 
     entities = [
         WuYeBaoCommunitySensor(client, entry.entry_id),

@@ -191,21 +191,15 @@ class WuYeBaoCallsImage(_WuYeBaoHubImage):
         super().__init__(hass, client, entry_id, "call_records")
 
     def _own_records(self, data: Any) -> list[dict[str, Any]]:
-        """Privacy (HACS review): only the owner's own unit call records."""
+        """Privacy (HACS review round 2): ONLY records addressed to the
+        owner's own binding number (callNumber).  unitId matching is not
+        enough - a unit door serves several flats."""
         if not isinstance(data, list) or not data:
             return []
-        unit_id = str(self._client.unit_id or "")
         binding = self._client.binding_code
-        if unit_id:
-            return [
-                c
-                for c in data
-                if str(c.get("unitId") or "") == unit_id
-                or (binding and c.get("callNumber") == binding)
-            ]
-        if binding:
-            return [c for c in data if c.get("callNumber") == binding]
-        return []
+        if not binding:
+            return []
+        return [c for c in data if c.get("callNumber") == binding]
 
     def _extract_url(self, data: Any) -> str | None:
         for c in self._own_records(data):
