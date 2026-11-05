@@ -4,12 +4,38 @@
   <img src="./custom_components/wuyebao/brand/logo.png" alt="物业宝" width="128"/>
 </p>
 
-[![HACS Default](https://img.shields.io/badge/HACS-Default-orange.svg)](https://hacs.xyz/)
+[![HACS Default](https://img.shields.io/badge/HACS-Default-41BDF5.svg?logo=homeassistantcommunitystore)](https://github.com/hacs/default)
+[![HACS Action](https://github.com/RockJesus/ha-wuyebao/actions/workflows/hacs.yaml/badge.svg)](https://github.com/RockJesus/ha-wuyebao/actions/workflows/hacs.yaml)
+[![hassfest](https://github.com/RockJesus/ha-wuyebao/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/RockJesus/ha-wuyebao/actions/workflows/hassfest.yaml)
+[![GitHub Release](https://img.shields.io/github/v/release/RockJesus/ha-wuyebao?logo=github)](https://github.com/RockJesus/ha-wuyebao/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业宝 App，实现门禁控制、实时监控、访客管理等功能。
+[中文](#中文) | [English](#english)
 
-> 仓库：https://github.com/RockJesus/ha-wuyebao
+## English
+
+**WuYeBao** is a Home Assistant integration for the 物业宝 (WuYeBao) property-management platform used by residential communities in mainland China. The cloud service is only available in mainland China, so this integration is only useful with a Chinese phone number and an active 物业宝 account.
+
+It connects Home Assistant to your community's door-access system and exposes:
+
+- 🔓 **Lock entities** for every gate of the community (community entrances + every building/unit door) — SIP-based remote door release
+- 📹 **Live camera streams** (built-in RTSP server, loopback only) and per-gate "latest visitor" snapshot cameras
+- 🚪 **Visitor auto-open** switch per gate, strictly limited to calls addressed to *your own flat*
+- 🛎️ The `wuyebao_visitor_call` event fired for your own visitor calls, with snapshot URL, for precise automations
+- 🛗 Elevator-call buttons per unit door, 户户通 (intercom) call button, QR-code door opening
+- 📋 Sensors for community notices, alarms, repair tickets, visitor codes and call records
+
+Verified in production with 27 gates / 190+ entities on Home Assistant 2026.10.
+
+> ⚠️ **Privacy by design**: visitor snapshots, call events and auto-open only ever react to calls addressed to your own binding number (`callNumber`). Neighbours' visitors are never exposed, logged or auto-opened. The built-in RTSP server binds to `127.0.0.1` only.
+
+### Installation
+
+This integration is part of the **HACS default catalog**: in HACS → Integrations, search for **物业宝** (or `wuyebao`) and download, then restart Home Assistant. Manual installation is described below (中文).
+
+---
+
+## 中文
 
 ## 功能特性
 
@@ -31,24 +57,27 @@ Home Assistant 自定义集成（集成域名 `wuyebao`），用于连接物业�
 
 ### 方法一：HACS 安装（推荐）
 
-#### 通过自定义存储库添加（首次使用）
+本集成已进入 **HACS 默认目录**（[hacs/default](https://github.com/hacs/default)），无需再手动添加自定义仓库：
 
-1. 确保已安装 [HACS](https://hacs.xyz/)（若未安装，请先在 HACS 官网按引导完成安装）
-2. 打开 Home Assistant，进入 **设置** > **设备与服务** > **HACS**（或侧边栏 **HACS**）
-3. 点击右上角 **三个点菜单（⋮）**，选择 **自定义存储库**（Custom repositories）
-4. 在弹出的输入框中填写：
-   - **存储库地址**（Repository）：`https://github.com/RockJesus/ha-wuyebao`
-   - **类别**（Category）：选择 **集成**（Integration）
-   - 点击 **添加**（Add）
-5. 底部会提示"这个存储库已添加到 HACS"，回到 HACS 首页
-6. 点击 **集成**（Integrations）标签，点击右下角 **+ 浏览并添加存储库**（Explore & add repositories）
-7. 搜索 **物业宝** 或 **wuyebao**，点击进入
-8. 点击 **下载**（Download），等待下载完成
-9. 按提示 **重启 Home Assistant**
+1. 确保已安装 [HACS](https://hacs.xyz/)
+2. 打开 Home Assistant，进入 **HACS** → **集成**（Integrations）
+3. 点击右下角 **+ 浏览并添加存储库**（Explore & add repositories）
+4. 搜索 **物业宝** 或 **wuyebao**，点击进入
+5. 点击 **下载**（Download），等待下载完成
+6. 按提示 **重启 Home Assistant**
 
 #### 后续更新
 
 - HACS 检测到新版本后，集成卡片会出现 **更新**（Update）按钮，点击更新并重启 Home Assistant 即可
+
+<details>
+<summary>旧版手动添加自定义仓库的方式（现已不需要，仅供备用）</summary>
+
+1. HACS → 右上角 **⋮** → **自定义存储库**（Custom repositories）
+2. 存储库地址：`https://github.com/RockJesus/ha-wuyebao`，类别：**集成**
+3. 回到 HACS 首页 → 集成 → 搜索 **物业宝** → 下载 → 重启 HA
+
+</details>
 
 ### 方法二：手动安装
 
