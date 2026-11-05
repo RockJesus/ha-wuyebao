@@ -102,6 +102,11 @@ class WuYeBaoClient:
         # the auto-open latency <=5s while cutting request volume by ~80%.
         self._calls_cache: list[dict[str, Any]] | None = None
         self._calls_cache_ts: float = 0.0
+        # Own-unit call-records cache (server-side filter by binding code,
+        # issue #1): kept separate from the community-wide cache because the
+        # two requests have different parameters.
+        self._unit_calls_cache: list[dict[str, Any]] | None = None
+        self._unit_calls_cache_ts: float = 0.0
 
     @property
     def access_token(self) -> str | None:
@@ -420,27 +425,43 @@ class WuYeBaoClient:
             _LOGGER.warning("Failed to resolve room from binding code: %s", err)
 
     async def get_calls(
-        self, page: int = 1, page_size: int = 200
+        self, page: int = 1, page_size: int = 200, call_number: str | None = None
     ) -> list[dict[str, Any]]:
         """Get call records (contain door camera snapshot images).
 
-        IMPORTANT: we deliberately do NOT pass ``callNumber`` (the logged-in
-        user's binding code).  The API then returns call records for EVERY
-        door in the community, which lets us match each gate to its own
+        IMPORTANT: by default we deliberately do NOT pass ``callNumber`` (the
+        logged-in user's binding code).  The API then returns call records for
+        EVERY door in the community, which lets us match each gate to its own
         visitor snapshot.  Passing the binding code would only ever return
         records from the user's own unit door, making every other gate show
         that unit's picture (cross-gate image mix-up).
+
+        ``call_number``: pass the user's binding code to fetch ONLY the call
+        records of the user's own unit door (server-side filter, issue #1).
+        Unit-filtered results use a separate TTL cache from the community
+        list.
         """
+        use_unit_cache = call_number is not None
         # TTL cache shared by every caller (camera snapshots, visitor
         # auto-open poller, hub poller): the community call list is fetched
         # once per CALLS_CACHE_TTL instead of once per entity per poll.
         now = time.time()
-        if self._calls_cache is not None and now - self._calls_cache_ts < CALLS_CACHE_TTL:
+        if use_unit_cache:
+            if (
+                self._unit_calls_cache is not None
+                and now - self._unit_calls_cache_ts < CALLS_CACHE_TTL
+            ):
+                return self._unit_calls_cache
+        elif (
+            self._calls_cache is not None and now - self._calls_cache_ts < CALLS_CACHE_TTL
+        ):
             return self._calls_cache
 
         params: dict[str, Any] = {}
         if self.community_id:
             params["communityId"] = self.community_id
+        if call_number:
+            params["callNumber"] = call_number
 
         path = API_CALLS.format(page=page, page_size=page_size)
         try:
@@ -450,11 +471,20 @@ class WuYeBaoClient:
         except Exception:
             # On transient failure prefer the last known list (entities keep
             # their last state) over re-raising and leaving cameras blank.
-            if self._calls_cache is not None:
+            if use_unit_cache:
+                if self._unit_calls_cache is not None:
+                    return self._unit_calls_cache
+            elif self._calls_cache is not None:
                 return self._calls_cache
             raise
         raw = data.get("data", data)
         if isinstance(raw, list):
+            if use_unit_cache:
+                self._unit_calls_cache = raw
+                self._unit_calls_cache_ts = time.time()
+            else:
+                self._calls_cache = raw
+                self._calls_cache_ts = time.time()
             return raw
         return []
 

@@ -39,6 +39,11 @@ API_CONTENTS = "/api/content/anon/classify/contents"
 # Content types for the 小区公告/轮播 content API (classifyId = communityId)
 CONTENT_TYPE_CAROUSEL = "TYPE_APP_CAROUSEL_ADS"
 
+# Event fired on the HA event bus whenever a NEW visitor call is detected
+# for the owner's own unit door (or a community wall gate).  Other units'
+# door calls are intentionally NOT fired (issue #1: whole-community spam).
+EVENT_VISITOR_CALL = "wuyebao_visitor_call"
+
 # SIP
 DEFAULT_SIP_SERVER = "new-sip.jhws.top"
 DEFAULT_SIP_PORT = 58583
