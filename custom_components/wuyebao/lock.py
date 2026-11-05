@@ -165,7 +165,7 @@ class WuYeBaoLock(LockEntity):
         return " ".join(parts) if parts else f"门禁-{device_number or gate.get('id', 'unknown')}"
 
     @property
-    def device_state_attributes(self) -> dict[str, Any]:
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional attributes."""
         return {
             "device_id": self._gate.get("id"),

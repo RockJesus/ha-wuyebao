@@ -196,7 +196,7 @@ class WuYeBaoVisitorButton(ButtonEntity):
         password = result.get("password")
         start = result.get("startTime")
         end = result.get("endTime")
-        _LOGGER.info("Visitor code created: %s", password)
+        _LOGGER.info("Visitor code created (code not logged, privacy)")
 
         # Refresh the cached visitor list so the 访客邀请 sensor picks it up.
         try:
